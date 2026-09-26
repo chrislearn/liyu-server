@@ -30,6 +30,27 @@ Invoke-RestMethod "$base/api/v1/auth/logout" -Method Post -Headers $headers
 
 `LIYU_API_URL` lets the app reach this test server; `LIYU_IDENTIFIER` selects another seeded/registered account, and `LIYU_AUTH_TOKEN` overrides automatic login. The app falls back to local demo data when the server is unavailable. The old whole-state endpoint permanently returns `410`: its JSON would contain private gift answers, addresses and money entries. Online workflows use the domain APIs below.
 
+## Upgrading a previously migrated database
+
+The schema now ships as a single `migrations/20260926000000_init/` pair. A database that was built by the old incremental migration chain (profile, catalog, fulfillment, commerce, wishlist, gifting, demo_logistics, wish_claim, session_expiry — with or without the short-lived `20260926100000_avatars`) has those version strings recorded in `__diesel_schema_migrations`, which the consolidated migration does not match. Pointing the new binary at such a database either replays the whole init script (`relation "users" already exists`) or skips it and silently misses the `avatars` table.
+
+For this local test backend the safe options are:
+
+1. **Rebuild (recommended).** This server stores only test data; drop and recreate the database and let migrations run on startup. Nothing of value is lost.
+2. **Hand-mark an existing database**, only if you must keep its rows:
+   - Take a backup first (`pg_dump`), and stop the server so no writes interleave.
+   - Verify the live schema really matches the old chain's final state; if it drifted, stop and rebuild instead.
+   - Create the avatars table if the old `20260926100000_avatars` migration never ran (see `migrations/20260926000000_init/up.sql`, section 11).
+   - Replace the version ledger so the consolidated migration is considered applied:
+     ```sql
+     TRUNCATE __diesel_schema_migrations;
+     INSERT INTO __diesel_schema_migrations (version, run_on)
+     VALUES ('20260926000000', now());
+     ```
+   - Restart and confirm the server boots without running further migrations.
+
+Do not edit `up.sql` to "make it fit" an old database; the single migration must stay an exact description of a fresh database.
+
 ## Current REST surface
 
 All paths below are under `/api/v1`, except `/health`. Authenticated endpoints need `Authorization: Bearer <token>`.

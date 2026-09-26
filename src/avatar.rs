@@ -219,10 +219,7 @@ async fn upload(req: &mut Request, res: &mut Response) {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(';').next().unwrap_or("").trim().to_owned())
         .unwrap_or_default();
-    if !matches!(
-        declared.as_str(),
-        "image/jpeg" | "image/png" | "image/webp"
-    ) {
+    if !matches!(declared.as_str(), "image/jpeg" | "image/png" | "image/webp") {
         return fail(
             res,
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -464,11 +461,7 @@ async fn media(req: &mut Request, res: &mut Response) {
 
 pub fn routes() -> Router {
     Router::new()
-        .push(
-            Router::with_path("me/avatar")
-                .post(upload)
-                .delete(delete),
-        )
+        .push(Router::with_path("me/avatar").post(upload).delete(delete))
         .push(Router::with_path("media/avatars/{id}").get(media))
 }
 
@@ -623,7 +616,8 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_and_cleans_up() {
-        let dir = std::env::temp_dir().join(format!("liyu-avatar-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("liyu-avatar-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("image");
         atomic_write(&path, b"first").unwrap();
@@ -688,16 +682,14 @@ mod tests {
             return; // Run with a migrated test database to exercise the DB path.
         };
         use diesel::Connection;
-        let mut conn =
-            diesel::PgConnection::establish(&url).expect("connect test database");
+        let mut conn = diesel::PgConnection::establish(&url).expect("connect test database");
         let rolled_back = conn.transaction::<(), diesel::result::Error, _>(|conn| {
             use avatars::dsl as a;
             use user_profiles::dsl as p;
-            let owner: i64 = diesel::sql_query(
-                "SELECT id FROM users WHERE identifier = 'demo@liyu.test'",
-            )
-            .get_result::<crate::SessionOwner>(conn)
-            .map(|row| row.user_id)?;
+            let owner: i64 =
+                diesel::sql_query("SELECT id FROM users WHERE identifier = 'demo@liyu.test'")
+                    .get_result::<crate::SessionOwner>(conn)
+                    .map(|row| row.user_id)?;
 
             let first = uuid::Uuid::new_v4();
             let first_url = format!("/api/v1/media/avatars/{}", first.simple());
@@ -745,25 +737,41 @@ mod tests {
                 .first(conn)?;
             assert_eq!(pointed.as_deref(), Some(second_url.as_str()));
 
-            // CHECK constraints mirror the handler's guards.
-            let bad_type = diesel::insert_into(a::avatars)
-                .values((
-                    a::id.eq(uuid::Uuid::new_v4()),
-                    a::owner_id.eq(owner),
-                    a::content_type.eq("image/gif"),
-                    a::byte_len.eq(10i32),
-                ))
-                .execute(conn);
+            // CHECK constraints mirror the handler's guards. Each expected
+            // failure runs in its own nested transaction (SAVEPOINT): without
+            // it, PostgreSQL aborts the whole transaction on the first
+            // constraint violation and every subsequent statement errors.
+            let bad_type = conn.transaction(|conn| {
+                diesel::insert_into(a::avatars)
+                    .values((
+                        a::id.eq(uuid::Uuid::new_v4()),
+                        a::owner_id.eq(owner),
+                        a::content_type.eq("image/gif"),
+                        a::byte_len.eq(10i32),
+                    ))
+                    .execute(conn)
+            });
             assert!(bad_type.is_err());
-            let bad_len = diesel::insert_into(a::avatars)
-                .values((
-                    a::id.eq(uuid::Uuid::new_v4()),
-                    a::owner_id.eq(owner),
-                    a::content_type.eq("image/png"),
-                    a::byte_len.eq(0i32),
-                ))
-                .execute(conn);
+            let bad_len = conn.transaction(|conn| {
+                diesel::insert_into(a::avatars)
+                    .values((
+                        a::id.eq(uuid::Uuid::new_v4()),
+                        a::owner_id.eq(owner),
+                        a::content_type.eq("image/png"),
+                        a::byte_len.eq(0i32),
+                    ))
+                    .execute(conn)
+            });
             assert!(bad_len.is_err());
+            // The aborted inserts rolled back to their savepoints, so the
+            // outer transaction is still healthy and the replacement row is
+            // untouched.
+            let still_there: Option<uuid::Uuid> = a::avatars
+                .filter(a::owner_id.eq(owner))
+                .select(a::id)
+                .first(conn)
+                .optional()?;
+            assert_eq!(still_there, Some(second));
 
             // Delete path: row gone, pointer cleared.
             diesel::delete(a::avatars.filter(a::id.eq(second))).execute(conn)?;
