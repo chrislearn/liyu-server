@@ -250,7 +250,10 @@ pub fn routes() -> Router {
             Router::with_path("api/v1/orders/{gift_id}/delivery-status")
                 .get(sender_delivery_status),
         )
-        .push(Router::with_path("api/v1/gifts/{gift_id}/delivery-summary").get(sender_delivery_status))
+        .push(
+            Router::with_path("api/v1/gifts/{gift_id}/delivery-summary")
+                .get(sender_delivery_status),
+        )
 }
 
 #[cfg(test)]

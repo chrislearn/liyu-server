@@ -388,7 +388,9 @@ async fn delete_address(req: &mut Request, res: &mut Response) {
     .execute(&mut conn)
     {
         Ok(0) => fail(res, StatusCode::NOT_FOUND, "address not found"),
-        Ok(_) => { res.status_code(StatusCode::NO_CONTENT); },
+        Ok(_) => {
+            res.status_code(StatusCode::NO_CONTENT);
+        }
         Err(_) => fail(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,

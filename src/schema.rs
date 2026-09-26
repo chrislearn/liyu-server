@@ -54,4 +54,10 @@ diesel::table! {
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(shipping_addresses -> users (user_id));
-diesel::allow_tables_to_appear_in_same_query!(users, sessions, catalog, user_profiles, shipping_addresses);
+diesel::allow_tables_to_appear_in_same_query!(
+    users,
+    sessions,
+    catalog,
+    user_profiles,
+    shipping_addresses
+);

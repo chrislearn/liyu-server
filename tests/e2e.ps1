@@ -18,6 +18,19 @@ function ExpectStatus([scriptblock]$Action, [int]$Expected) {
 $sender = Login 'demo@liyu.test'
 $recipient = Login 'linzhou@liyu.test'
 $stranger = Login 'chenxiao@liyu.test'
+$newIdentifier = "e2e-$([guid]::NewGuid().ToString('N'))"
+$registration = @{ identifier = $newIdentifier; display_name = '测试新用户'; password = '123456'; code = '123456' } | ConvertTo-Json -Compress
+$newAccount = Invoke-RestMethod "$BaseUrl/api/v1/auth/register" -Method Post -ContentType 'application/json' -Body $registration
+if (-not $newAccount.token) { throw 'Registration did not create a session' }
+$oldSession = @{ Authorization = "Bearer $($newAccount.token)" }
+$rotated = Invoke-RestMethod "$BaseUrl/api/v1/auth/refresh" -Method Post -Headers $oldSession
+if (-not $rotated.token -or $rotated.token -eq $newAccount.token) { throw 'Session refresh did not rotate token' }
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me" -Headers $oldSession } 401
+$newSession = @{ Authorization = "Bearer $($rotated.token)" }
+Invoke-RestMethod "$BaseUrl/api/v1/auth/logout" -Method Post -Headers $newSession | Out-Null
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me" -Headers $newSession } 401
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/auth/register" -Method Post -ContentType 'application/json' -Body (@{ identifier = "bad-$newIdentifier"; password = '123456'; code = '000000' } | ConvertTo-Json -Compress) } 400
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/auth/login" -Method Post -ContentType 'application/json' -Body (@{ identifier = $newIdentifier; password = 'wrong' } | ConvertTo-Json -Compress) } 401
 $products = Invoke-RestMethod "$BaseUrl/api/v1/catalog?limit=50"
 if ($products.items.Count -ne 33) { throw "Expected 33 catalog products" }
 
@@ -30,6 +43,7 @@ ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/shipments/900001" -Headers $se
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/shipments/900001" -Headers $stranger } 404
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/gifts/900001/delivery-summary" -Headers $recipient } 404
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/state" -Headers $sender } 410
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/state" -Method Put -Headers $sender -ContentType 'application/json' -Body '{}' } 410
 
 $recipientProfile = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $recipient
 $senderProfile = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $sender
@@ -50,4 +64,28 @@ $detail = Invoke-RestMethod "$BaseUrl/api/v1/orders/$($order.id)" -Headers $send
 if ($detail.items.Count -ne 1 -or -not $detail.items[0].gift_id) { throw 'Payment did not create a gift' }
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/orders/$($order.id)" -Headers $stranger } 404
 
-Write-Output "LiYu end-to-end API checks passed: 33 products, scoped profile/parcel/order, cart, idempotent payment, legacy state disabled."
+$giftId = $detail.items[0].gift_id
+$puzzleBody = @{ unlock_kind = 'question'; clue = '测试答案是什么'; answer = '礼遇'; message = '演示祝福' } | ConvertTo-Json -Compress
+Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/puzzle" -Method Put -Headers $sender -ContentType 'application/json' -Body $puzzleBody | Out-Null
+$sealed = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $recipient
+if ($sealed.state -ne 'sealed' -or $sealed.PSObject.Properties.Name -contains 'product_id' -or ($sealed | ConvertTo-Json -Compress) -match '礼遇|演示祝福') {
+    throw 'Sealed gift leaked its answer, product, or private message'
+}
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $stranger } 404
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/open" -Method Post -Headers $sender } 404
+Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/open" -Method Post -Headers $recipient | Out-Null
+$wrong = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/answer" -Method Post -Headers $recipient -ContentType 'application/json' -Body '{"answer":"错误"}'
+if ($wrong.correct -or $wrong.attempts_left -ne 2) { throw 'Wrong answer was not counted' }
+$right = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/answer" -Method Post -Headers $recipient -ContentType 'application/json' -Body '{"answer":"礼遇"}'
+if (-not $right.correct -or $right.state -ne 'revealed') { throw 'Correct answer did not reveal gift' }
+$acceptBody = @{ recipient_name = '林舟'; recipient_phone = '13900000000'; recipient_address = '演示路 8 号（测试）' } | ConvertTo-Json -Compress
+Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/accept" -Method Post -Headers $recipient -ContentType 'application/json' -Body $acceptBody | Out-Null
+$senderGift = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $sender
+$recipientGift = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $recipient
+if ($senderGift.state -ne 'handled' -or $senderGift.price_cents -ne 10900 -or $recipientGift.state -ne 'accepted') { throw 'Gift role projections are inconsistent' }
+if (($senderGift | ConvertTo-Json -Compress) -match '13900000000|演示路|tracking|voucher|answer|contract|exchanged|cashed_out') { throw 'Sender gift projection leaked recipient-private fields' }
+ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Headers $sender } 404
+$acceptedShipment = Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Headers $recipient
+if ($acceptedShipment.recipient.phone -ne '13900000000') { throw 'Recipient shipment missing address snapshot' }
+
+Write-Output "LiYu end-to-end API checks passed: registration/session rotation, 33 products, scoped profile/parcel/order, cart, payment, puzzle, acceptance, and legacy state disabled."

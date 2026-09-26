@@ -629,6 +629,10 @@ async fn delete_wishlist(req: &mut Request, res: &mut Response) {
             StatusCode::CONFLICT,
             "wishlist not found or has claimed items",
         ),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::ForeignKeyViolation,
+            _,
+        )) => error(res, StatusCode::CONFLICT, "wishlist cannot be deleted yet"),
         Err(_) => error(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -710,6 +714,10 @@ async fn delete_item(req: &mut Request, res: &mut Response) {
             StatusCode::CONFLICT,
             "item unavailable, claimed, or last item",
         ),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::ForeignKeyViolation,
+            _,
+        )) => error(res, StatusCode::CONFLICT, "item cannot be deleted yet"),
         Err(_) => error(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,
