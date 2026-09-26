@@ -26,15 +26,6 @@ fn fail(res: &mut Response, status: StatusCode, message: &str) {
     res.render(Json(json!({"error": message})));
 }
 
-fn extension(content_type: &str) -> Option<&'static str> {
-    match content_type {
-        "image/jpeg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/webp" => Some("webp"),
-        _ => None,
-    }
-}
-
 /// Detect the real image format and pixel dimensions from magic bytes and
 /// container headers. The declared Content-Type is never trusted on its own.
 pub(crate) fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
@@ -666,11 +657,13 @@ mod tests {
         assert_eq!(sniff_image(b"RIFF\x00\x00\x00\x00WEBPXXXX"), None);
     }
 
-    #[test]
-    fn limits_are_sane() {
+    // Compile-time guard on the limit constants: if someone loosens them the
+    // build fails here, not in production. (`assert!` on constants in a test
+    // trips clippy::assertions_on_constants.)
+    const _: () = {
         assert!(MAX_BYTES <= 1_048_576);
         assert!(MIN_DIMENSION >= 1 && MAX_DIMENSION <= 16384);
-    }
+    };
 
     /// Database contract behind the avatar API: record insert with the CHECKed
     /// invariants, one-avatar-per-owner replacement, profile pointer swap and
@@ -686,10 +679,11 @@ mod tests {
         let rolled_back = conn.transaction::<(), diesel::result::Error, _>(|conn| {
             use avatars::dsl as a;
             use user_profiles::dsl as p;
-            let owner: i64 =
-                diesel::sql_query("SELECT id AS user_id FROM users WHERE identifier = 'demo@liyu.test'")
-                    .get_result::<crate::SessionOwner>(conn)
-                    .map(|row| row.user_id)?;
+            let owner: i64 = diesel::sql_query(
+                "SELECT id AS user_id FROM users WHERE identifier = 'demo@liyu.test'",
+            )
+            .get_result::<crate::SessionOwner>(conn)
+            .map(|row| row.user_id)?;
 
             let first = uuid::Uuid::new_v4();
             let first_url = format!("/api/v1/media/avatars/{}", first.simple());
