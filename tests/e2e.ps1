@@ -89,64 +89,11 @@ $acceptedShipment = Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Heade
 if ($acceptedShipment.recipient.phone -ne '13900000000') { throw 'Recipient shipment missing address snapshot' }
 
 # --- Avatar upload API: negative and positive end-to-end checks ---
-# Build a real 24x16 PNG in memory (valid CRC via System.Drawing is not
-# available everywhere, so hand-roll a minimal true PNG with zlib store blocks).
-function New-TestPng([int]$Width, [int]$Height) {
-    Add-Type -AssemblyName System.IO.Compression
-    $ms = [System.IO.MemoryStream]::new()
-    $bw = [System.IO.BinaryWriter]::new($ms)
-    $bw.Write([byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
-    function Write-Chunk([System.IO.BinaryWriter]$w, [string]$Type, [byte[]]$Data) {
-        $len = [BitConverter]::GetBytes([uint32]$Data.Length); [Array]::Reverse($len)
-        $w.Write($len); $w.Write([Text.Encoding]::ASCII.GetBytes($Type)); $w.Write($Data)
-        $crcInput = [Text.Encoding]::ASCII.GetBytes($Type) + $Data
-        # CRC-32 (PNG polynomial), kept in uint32 to avoid sign issues.
-        $crc = [uint32]0xFFFFFFFF
-        foreach ($b in $crcInput) {
-            $crc = $crc -bxor [uint32]$b
-            for ($i = 0; $i -lt 8; $i++) {
-                $mask = [uint32](0 - ($crc -band 1))
-                $crc = ($crc -shr 1) -bxor ([uint32]0xEDB88320 -band $mask)
-            }
-        }
-        $crcBytes = [BitConverter]::GetBytes([uint32]($crc -bxor [uint32]0xFFFFFFFF)); [Array]::Reverse($crcBytes)
-        $w.Write($crcBytes)
-    }
-    $ihdrBytes = [byte[]]::new(13)
-    $wBytes = [BitConverter]::GetBytes([uint32]$Width); [Array]::Reverse($wBytes)
-    $hBytes = [BitConverter]::GetBytes([uint32]$Height); [Array]::Reverse($hBytes)
-    [Array]::Copy($wBytes, 0, $ihdrBytes, 0, 4)
-    [Array]::Copy($hBytes, 0, $ihdrBytes, 4, 4)
-    $ihdrBytes[8] = 8; $ihdrBytes[9] = 2 # 8-bit RGB
-    Write-Chunk $bw 'IHDR' $ihdrBytes
-    # Raw scanlines: filter byte 0 + RGB pixels, zlib-stored (no compression).
-    $raw = [byte[]]::new($Height * (1 + 3 * $Width))
-    for ($y = 0; $y -lt $Height; $y++) { $raw[$y * (1 + 3 * $Width)] = 0 }
-    $zms = [System.IO.MemoryStream]::new()
-    $zw = [System.IO.BinaryWriter]::new($zms)
-    $zw.Write([byte]0x78); $zw.Write([byte]0x01) # zlib header, no compression
-    $pos = 0
-    while ($pos -lt $raw.Length) {
-        $blockLen = [Math]::Min(65535, $raw.Length - $pos)
-        $final = if ($pos + $blockLen -eq $raw.Length) { [byte]1 } else { [byte]0 }
-        $zw.Write($final)
-        $zw.Write([BitConverter]::GetBytes([uint16]$blockLen))
-        $zw.Write([BitConverter]::GetBytes([uint16](-bnot $blockLen -band 0xFFFF)))
-        $zw.Write($raw, $pos, $blockLen)
-        $pos += $blockLen
-    }
-    # Adler-32 of raw
-    $a = 1; $b = 0
-    foreach ($byte in $raw) { $a = ($a + $byte) % 65521; $b = ($b + $a) % 65521 }
-    $adler = [BitConverter]::GetBytes([uint32](($b -shl 16) -bor $a)); [Array]::Reverse($adler)
-    $zw.Write($adler)
-    Write-Chunk $bw 'IDAT' $zms.ToArray()
-    Write-Chunk $bw 'IEND' ([byte[]]::new(0))
-    $bw.Flush()
-    return $ms.ToArray()
-}
-
-$png24 = New-TestPng 24 16
+# Upload sample: the repository's real 400x400 PNG (assets/products/p23.png,
+# ~15 KB). Hand-rolled in-memory PNGs proved brittle across PowerShell builds
+# (uint32 casts, zlib framing), so the positive path uses bytes the real
+# decoder is guaranteed to accept.
+$png24 = [System.IO.File]::ReadAllBytes("$PSScriptRoot/../assets/products/p23.png")
 # 1. Unauthenticated upload is rejected.
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -ContentType 'image/png' -Body $png24 } 401
 # 2. Declared content type outside the allow-list is rejected.
@@ -157,17 +104,30 @@ ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -Heade
 $fakePng = [byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A, 0,0,0,13) + [Text.Encoding]::ASCII.GetBytes('IHDR') + [byte[]](0,0,0,64, 0,0,0,32, 8,2,0,0,0) + [byte[]]::new(20) + [Text.Encoding]::ASCII.GetBytes('IEND') + [byte[]](0xAE,0x42,0x60,0x82)
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -Headers $sender -ContentType 'image/png' -Body $fakePng } 422
 # 5. Decompression bomb dimensions (declared 65535x65535) rejected pre-decode.
-$bombPng = New-TestPng 64 64
+# Corrupt only the IHDR width/height bytes of the real PNG.
+$bombPng = [byte[]]$png24.Clone()
 $bombPng[16] = 0xFF; $bombPng[17] = 0xFF; $bombPng[18] = 0xFF; $bombPng[19] = 0xFF
 $bombPng[20] = 0xFF; $bombPng[21] = 0xFF; $bombPng[22] = 0xFF; $bombPng[23] = 0xFF
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -Headers $sender -ContentType 'image/png' -Body $bombPng } 422
-# 6. Oversized body (> 1 MiB) is rejected.
-$big = [byte[]]::new(1048577)
-[Array]::Copy($png24, $big, $png24.Length)
-ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -Headers $sender -ContentType 'image/png' -Body $big } 413
+# 6. Oversized body (> 1 MiB) is rejected with 413. Sent via curl:
+# Invoke-RestMethod reports a broken pipe when the server rejects the request
+# before the upload stream finishes, which hides the real status code.
+$bigPath = Join-Path ([System.IO.Path]::GetTempPath()) "liyu-avatar-big-$([Guid]::NewGuid().ToString('N')).bin"
+try {
+    $big = [byte[]]::new(1048577)
+    [Array]::Copy($png24, $big, $png24.Length)
+    [System.IO.File]::WriteAllBytes($bigPath, $big)
+    $token = $sender['Authorization'] -replace '^Bearer ', ''
+    $curlOut = & curl -sS -o /dev/null -w '%{http_code}' -X POST "$BaseUrl/api/v1/me/avatar" -H "Authorization: Bearer $token" -H 'Content-Type: image/png' --data-binary "@$bigPath" 2>&1
+    if ($LASTEXITCODE -ne 0 -and "$curlOut" -notmatch '^\d{3}$') { throw "curl oversized upload failed: $curlOut" }
+    $code = ("$curlOut" -split "`n")[-1].Trim()
+    if ($code -ne '413') { throw "Oversized avatar upload: expected 413, got $code" }
+} finally {
+    Remove-Item $bigPath -ErrorAction SilentlyContinue
+}
 # 7. Valid upload succeeds and returns the media URL + dimensions.
 $upload = Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -Headers $sender -ContentType 'image/png' -Body $png24
-if ($upload.width -ne 24 -or $upload.height -ne 16 -or $upload.content_type -ne 'image/png') { throw 'Avatar upload returned wrong metadata' }
+if ($upload.width -ne 400 -or $upload.height -ne 400 -or $upload.content_type -ne 'image/png') { throw 'Avatar upload returned wrong metadata' }
 if ($upload.avatar_url -notmatch '^/api/v1/media/avatars/[0-9a-f]{32}$') { throw "Unexpected avatar_url: $($upload.avatar_url)" }
 # 8. The media endpoint serves the stored bytes with the right content type.
 $media = Invoke-WebRequest "$BaseUrl$($upload.avatar_url)"
