@@ -51,13 +51,25 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    avatars (id) {
+        id -> Uuid,
+        owner_id -> Int8,
+        content_type -> Text,
+        byte_len -> Int4,
+        created_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(shipping_addresses -> users (user_id));
+diesel::joinable!(avatars -> users (owner_id));
 diesel::allow_tables_to_appear_in_same_query!(
     users,
     sessions,
     catalog,
     user_profiles,
-    shipping_addresses
+    shipping_addresses,
+    avatars
 );

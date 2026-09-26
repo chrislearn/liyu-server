@@ -1,3 +1,4 @@
+mod avatar;
 mod catalog;
 mod commerce;
 mod demo_logistics;
@@ -24,7 +25,7 @@ const TEST_CODE: &str = "123456";
 const SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 #[derive(QueryableByName)]
-struct SessionOwner {
+pub(crate) struct SessionOwner {
     #[diesel(sql_type = BigInt)]
     user_id: i64,
 }
@@ -317,6 +318,7 @@ async fn main() {
         .push(Router::with_path("api/v1/auth/logout").post(logout))
         .push(Router::with_path("api/v1/auth/refresh").post(refresh))
         .push(Router::with_path("api/v1").push(profile::routes()))
+        .push(Router::with_path("api/v1").push(avatar::routes()))
         .push(fulfillment::routes())
         .push(commerce::routes())
         .push(catalog::routes())

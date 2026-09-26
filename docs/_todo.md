@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | 注册、登录、登出、会话续期 | `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/refresh`, `GET /me` | 服务端 30 天会话到期、登出撤销、原子轮换已实现；app 资料页可注册/登录/切换账号，但目前仅资料及购物车 API 使用此身份，礼盒/心愿仍有独立离线演示状态，客户端 token 到期自动续期未做。测试密码与注册验证码均 `123456`，不发送邮件短信。 |
 | 个人资料 | `GET/PATCH /me/profile`（display_name、avatar_url 白名单）；`PUT /me/phone`, `PUT /me/email`（测试码）；后续 `PUT /me/password` | 显示名、手机、邮箱 API 和资料页编辑已接入；服务端断开时资料可在本机演示。手机号/邮箱不得出现在公开资料。密码修改待做。 |
-| 头像 | 目前 `PATCH /me/profile` 仅接受受约束 HTTPS `avatar_url`；目标 `POST /me/avatar`（限定 JPEG/PNG/WebP、大小/尺寸、裁切），`DELETE /me/avatar`；`GET /media/avatars/{id}` | URL 引用不是实际上传；需加头像选择/预览/上传与默认头像，数据库只存媒体 ID。 |
+| 头像 | `POST /me/avatar`（JPEG/PNG/WebP ≤1 MiB、16–4096 px、魔数嗅探+完整解码校验），`DELETE /me/avatar`；`GET /media/avatars/{id}`（公开、immutable 缓存） | 服务端已实现二进制上传/替换/删除，UUID 文件名存于 `assets/avatars/`，数据库只存媒体记录与 URL 指针，事务内原子切换；服务端裁剪与 app 端选择/预览/上传接入待做。 |
 | 收货地址 | `GET/POST /me/addresses`, `PUT/DELETE /me/addresses/{id}` | 服务端 owner-only CRUD 与 app 地址簿新增/编辑/删除已完成；送礼人不能读取。 |
 | 通知偏好 | `GET/PATCH /me/settings` | UI 已有三个提醒开关和主题；本地偏好与服务端通知偏好分开。 |
 | 商品分类、搜索、详情 | `GET /catalog/categories`, `GET /catalog?category=&q=&cursor=`, `GET /catalog/{id}` | 服务端已对齐 33 件；app 商品详情会读取服务器名称、描述和价格，商品主列表仍读本地目录，需进一步接入在线搜索/分页。 |

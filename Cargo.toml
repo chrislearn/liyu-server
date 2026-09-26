@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-diesel = { version = "2.3", features = ["postgres", "r2d2", "serde_json"] }
+diesel = { version = "2.3", features = ["postgres", "r2d2", "serde_json", "uuid"] }
 diesel_migrations = "2.3"
 salvo = { version = "0.84", features = ["http1", "server"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+# Real image decoding for avatar validation; only the formats we accept.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
