@@ -687,7 +687,7 @@ mod tests {
             use avatars::dsl as a;
             use user_profiles::dsl as p;
             let owner: i64 =
-                diesel::sql_query("SELECT id FROM users WHERE identifier = 'demo@liyu.test'")
+                diesel::sql_query("SELECT id AS user_id FROM users WHERE identifier = 'demo@liyu.test'")
                     .get_result::<crate::SessionOwner>(conn)
                     .map(|row| row.user_id)?;
 
