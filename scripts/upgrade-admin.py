@@ -25,8 +25,16 @@ if state == '3':
     print('Admin schema is already installed; no changes made.')
 elif state == '0':
     migration = pathlib.Path(__file__).resolve().parents[1] / 'migrations/20260926000000_init/up.sql'
-    section = migration.read_text().split('-- 12. web administration', 1)[1]
+    section = migration.read_text().split('-- 12. web administration', 1)[1].split('-- 13. management domains',1)[0]
     psql('-- 12. web administration' + section, '-1')
     print('Admin tables and product ID sequence installed. Existing users, catalog and sessions preserved.')
 else:
     sys.exit('Partial admin schema detected. Stop and inspect it before upgrading.')
+
+# The extension uses the same migration file; serialize with server startup.
+migration = pathlib.Path(__file__).resolve().parents[1] / 'migrations/20260926000000_init/up.sql'
+section = migration.read_text().split('-- 13. management domains', 1)[1]
+psql("BEGIN; SELECT pg_advisory_xact_lock(731129927); DO $upgrade$ BEGIN "
+     "IF to_regclass('management_schema_version') IS NULL THEN EXECUTE $domain$"
+     + section + "$domain$; END IF; END $upgrade$; COMMIT;")
+print('Management schema ready; existing business data preserved.')

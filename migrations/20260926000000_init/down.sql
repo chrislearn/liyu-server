@@ -1,3 +1,16 @@
+DROP TABLE management_schema_version;
+DROP TABLE notifications;
+DROP TABLE gift_contracts;
+DROP TABLE wallet_ledger;
+DROP TABLE recycle_policies;
+ALTER TABLE orders DROP COLUMN coupon_id, DROP COLUMN discount_cents, DROP COLUMN subtotal_cents;
+DROP TABLE user_coupons;
+DROP TABLE coupon_templates;
+DROP TRIGGER catalog_change ON catalog;
+DROP FUNCTION record_catalog_change();
+DROP TABLE catalog_history;
+DROP TABLE admin_audit;
+ALTER TABLE users DROP COLUMN is_active;
 DROP TABLE admin_sessions;
 DROP TABLE administrators;
 -- Reverses the consolidated initial schema. Drops follow the exact reverse of

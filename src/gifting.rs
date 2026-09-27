@@ -404,6 +404,7 @@ async fn open(req: &mut Request, res: &mut Response) {
         let Some(row) = row else { return Ok(None) };
         if row.state != "sealed" { return Ok(Some("already_open")) }
         if row.expired {
+            crate::benefits::refund(conn, row.id, "expired")?;
             diesel::sql_query("UPDATE gifts SET state='expired',settled_at=now() WHERE id=$1")
                 .bind::<BigInt, _>(row.id).execute(conn)?;
             release_wish(conn, row.id)?;
@@ -455,6 +456,7 @@ async fn answer(req: &mut Request, res: &mut Response) {
             return Ok(Some((false, -1, false)));
         }
         if row.expired {
+            crate::benefits::refund(conn, id, "expired")?;
             diesel::sql_query("UPDATE gifts SET state='expired',settled_at=now() WHERE id=$1")
                 .bind::<BigInt, _>(id)
                 .execute(conn)?;
@@ -571,6 +573,7 @@ async fn withdraw(req: &mut Request, res: &mut Response) {
         if row.state != "sealed" {
             return Ok(Some(false));
         }
+        crate::benefits::refund(conn, id, "withdraw")?;
         diesel::sql_query("UPDATE gifts SET state='withdrawn',settled_at=now() WHERE id=$1")
             .bind::<BigInt, _>(id)
             .execute(conn)?;

@@ -1,0 +1,12 @@
+[application]
+name = "liyu-admin"
+default_platform = "web"
+out_dir = "dist"
+[web.app]
+title = "礼遇 · 运营管理"
+base_path = "admin"
+[web.resource]
+style = ["/admin/app.css"]
+[web.resource.dev]
+style = []
+script = []

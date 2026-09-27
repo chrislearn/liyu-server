@@ -471,3 +471,75 @@ CREATE INDEX admin_sessions_administrator_idx ON admin_sessions(administrator_id
 CREATE SEQUENCE catalog_id_seq OWNED BY catalog.id;
 SELECT setval('catalog_id_seq', GREATEST((SELECT MAX(id) FROM catalog), 32), true);
 ALTER TABLE catalog ALTER COLUMN id SET DEFAULT nextval('catalog_id_seq');
+
+-- 13. management domains -----------------------------------------------------
+ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT true;
+CREATE TABLE admin_audit (
+ id BIGSERIAL PRIMARY KEY, administrator_id BIGINT REFERENCES administrators(id),
+ action TEXT NOT NULL, entity TEXT NOT NULL, entity_id BIGINT NOT NULL,
+ reason TEXT NOT NULL DEFAULT '', before_data JSONB, after_data JSONB,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE catalog_history (
+ id BIGSERIAL PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES catalog(id),
+ old_price_cents BIGINT NOT NULL, new_price_cents BIGINT NOT NULL,
+ old_stock INTEGER NOT NULL, new_stock INTEGER NOT NULL,
+ old_active BOOLEAN NOT NULL, new_active BOOLEAN NOT NULL,
+ administrator_id BIGINT REFERENCES administrators(id), reason TEXT NOT NULL DEFAULT 'business',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE FUNCTION record_catalog_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF (OLD.price_cents,OLD.stock,OLD.is_active) IS DISTINCT FROM (NEW.price_cents,NEW.stock,NEW.is_active) THEN
+ INSERT INTO catalog_history(product_id,old_price_cents,new_price_cents,old_stock,new_stock,old_active,new_active,administrator_id,reason)
+ VALUES(NEW.id,OLD.price_cents,NEW.price_cents,OLD.stock,NEW.stock,OLD.is_active,NEW.is_active,
+ NULLIF(current_setting('liyu.administrator',true),'')::bigint,COALESCE(NULLIF(current_setting('liyu.reason',true),''),'business'));
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER catalog_change AFTER UPDATE ON catalog FOR EACH ROW EXECUTE FUNCTION record_catalog_change();
+CREATE TABLE coupon_templates (
+ id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
+ kind TEXT NOT NULL CHECK(kind IN ('promotion','new_user','compensation')),
+ discount_kind TEXT NOT NULL CHECK(discount_kind IN ('fixed','percentage')),
+ value BIGINT NOT NULL CHECK(value>0), min_spend_cents BIGINT NOT NULL DEFAULT 0 CHECK(min_spend_cents>=0),
+ max_discount_cents BIGINT NOT NULL DEFAULT 0 CHECK(max_discount_cents>=0),
+ product_id INTEGER REFERENCES catalog(id), category TEXT NOT NULL DEFAULT '',
+ starts_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+ issue_limit INTEGER NOT NULL CHECK(issue_limit>0), per_user_limit INTEGER NOT NULL DEFAULT 1 CHECK(per_user_limit>0),
+ is_active BOOLEAN NOT NULL DEFAULT true, CHECK(expires_at>starts_at),
+ CHECK(discount_kind<>'percentage' OR value<=10000), CHECK(value<=1000000000),
+ CHECK(category IN ('','coffee','movie','trendy','blind','sweet','digital','home','baby'))
+);
+CREATE TABLE user_coupons (
+ id BIGSERIAL PRIMARY KEY, template_id BIGINT NOT NULL REFERENCES coupon_templates(id),
+ user_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available','reserved','used','revoked')),
+ order_id BIGINT UNIQUE REFERENCES orders(id), issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), used_at TIMESTAMPTZ
+);
+CREATE INDEX user_coupons_owner_idx ON user_coupons(user_id,id);
+ALTER TABLE orders ADD COLUMN subtotal_cents BIGINT NOT NULL DEFAULT 0,
+ ADD COLUMN discount_cents BIGINT NOT NULL DEFAULT 0 CHECK(discount_cents>=0),
+ ADD COLUMN coupon_id BIGINT REFERENCES user_coupons(id);
+UPDATE orders SET subtotal_cents=total_cents;
+CREATE TABLE recycle_policies (
+ product_id INTEGER PRIMARY KEY REFERENCES catalog(id), is_active BOOLEAN NOT NULL DEFAULT true,
+ mode TEXT NOT NULL CHECK(mode IN ('fixed','percentage')), value BIGINT NOT NULL CHECK(value>=0 AND value<=1000000000),
+ expires_at TIMESTAMPTZ, CHECK(mode<>'percentage' OR value<=10000)
+);
+CREATE TABLE wallet_ledger (
+ id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),
+ amount_cents BIGINT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('cash_out','exchange','withdraw','expired')),
+ gift_id BIGINT NOT NULL REFERENCES gifts(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(gift_id,kind)
+);
+CREATE INDEX wallet_ledger_owner_idx ON wallet_ledger(user_id,id);
+CREATE TABLE gift_contracts (
+ gift_id BIGINT PRIMARY KEY REFERENCES gifts(id), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','fulfilled','waived')),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE notifications (
+ id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),
+ title TEXT NOT NULL CHECK(char_length(title) BETWEEN 1 AND 100),body TEXT NOT NULL CHECK(char_length(body)<=2000),
+ expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ,read_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE management_schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO management_schema_version VALUES(1);

@@ -37,9 +37,9 @@ struct Admin {
     password_hash: String,
 }
 #[derive(QueryableByName)]
-struct Session {
+pub(super) struct Session {
     #[diesel(sql_type = BigInt)]
-    id: i64,
+    pub(super) id: i64,
     #[diesel(sql_type = Text)]
     username: String,
     #[diesel(sql_type = Text)]
@@ -69,7 +69,8 @@ pub(crate) fn ensure_schema(conn: &mut PgConnection) -> Result<(), String> {
             0 => {
                 let sql = include_str!("../migrations/20260926000000_init/up.sql")
                     .split_once("-- 12. web administration")
-                    .expect("admin section in consolidated migration").1;
+                    .expect("admin section in consolidated migration").1
+                    .split("-- 13. management domains").next().unwrap();
                 conn.batch_execute(&format!("-- 12. web administration{sql}"))?;
             }
             3 => (),
@@ -178,7 +179,7 @@ fn same_origin(req: &Request) -> bool {
     }
 }
 
-fn authorize(req: &Request, res: &mut Response, mutation: bool) -> Option<Session> {
+pub(super) fn authorize(req: &Request, res: &mut Response, mutation: bool) -> Option<Session> {
     let Some(secret) = token(req) else {
         error(
             res,
@@ -250,18 +251,49 @@ async fn page(res: &mut Response) {
         .insert("cache-control", "no-store".parse().unwrap());
     res.headers_mut()
         .insert("x-frame-options", "DENY".parse().unwrap());
-    res.headers_mut().insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().unwrap());
-    res.render(salvo::prelude::Text::Html(include_str!(
-        "../web/admin.html"
-    )));
+    // Generated bootstrap is an external module; only WASM compilation is permitted.
+    res.headers_mut().insert("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".parse().unwrap());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist/index.html");
+    match std::fs::read_to_string(root) {
+        Ok(html) => res.render(salvo::prelude::Text::Html(html)),
+        Err(_) => {
+            res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+            res.render(salvo::prelude::Text::Html("<html lang=\"zh-CN\"><title>礼遇管理后台</title><p>请先运行 just build-admin 构建 Dioxus 管理界面，再刷新本页。</p></html>"));
+        }
+    }
 }
 #[handler]
-async fn script(res: &mut Response) {
-    res.headers_mut().insert(
-        "content-type",
-        "application/javascript; charset=utf-8".parse().unwrap(),
-    );
-    res.render(include_str!("../web/admin.js"));
+async fn asset(req: &mut Request, res: &mut Response) {
+    let path = req.param::<String>("path").unwrap_or_default();
+    if path.split('/').any(|p| p == ".." || p.is_empty()) || path.contains('\\') {
+        return error(res, StatusCode::NOT_FOUND, "asset not found");
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist/assets");
+    let Ok(root) = root.canonicalize() else {
+        return error(res, StatusCode::NOT_FOUND, "build admin UI first");
+    };
+    let Ok(file) = root.join(&path).canonicalize() else {
+        return error(res, StatusCode::NOT_FOUND, "asset not found");
+    };
+    if !file.starts_with(&root) {
+        return error(res, StatusCode::NOT_FOUND, "asset not found");
+    }
+    match std::fs::read(&file) {
+        Ok(bytes) => {
+            let mime = match file.extension().and_then(|s| s.to_str()) {
+                Some("wasm") => "application/wasm",
+                Some("js") => "application/javascript",
+                Some("css") => "text/css",
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                _ => "application/octet-stream",
+            };
+            res.headers_mut()
+                .insert("content-type", mime.parse().unwrap());
+            let _ = res.write_body(bytes);
+        }
+        Err(_) => error(res, StatusCode::NOT_FOUND, "asset not found"),
+    }
 }
 #[handler]
 async fn style(res: &mut Response) {
@@ -397,10 +429,14 @@ struct ProductInput {
     tags: Vec<String>,
     stock: i32,
     is_active: bool,
+    reason: Option<String>,
 }
 impl ProductInput {
     fn valid(&self) -> bool {
-        !self.name.trim().is_empty()
+        self.reason
+            .as_ref()
+            .is_none_or(|r| r.chars().count() <= 500)
+            && !self.name.trim().is_empty()
             && self.name.chars().count() <= 200
             && crate::catalog::CATEGORIES
                 .iter()
@@ -455,9 +491,9 @@ async fn products(req: &mut Request, res: &mut Response) {
     }
 }
 async fn save(req: &mut Request, res: &mut Response, create: bool) {
-    if authorize(req, res, true).is_none() {
+    let Some(actor) = authorize(req, res, true) else {
         return;
-    }
+    };
     let body: ProductInput = match req.parse_json().await {
         Ok(v) => v,
         Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid JSON"),
@@ -465,6 +501,11 @@ async fn save(req: &mut Request, res: &mut Response, create: bool) {
     if !body.valid() {
         return error(res, StatusCode::BAD_REQUEST, "invalid product fields");
     }
+    let reason = body
+        .reason
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("product edit");
     let id = if create {
         0
     } else {
@@ -493,11 +534,46 @@ async fn save(req: &mut Request, res: &mut Response, create: bool) {
         .bind::<Array<Text>, _>(&body.tags)
         .bind::<Integer, _>(body.stock)
         .bind::<Bool, _>(body.is_active);
-    let result = if create {
-        query.get_result::<Id>(&mut conn)
-    } else {
-        query.bind::<Integer, _>(id).get_result::<Id>(&mut conn)
-    };
+    let result = conn.transaction::<Id, diesel::result::Error, _>(|conn| {
+        sql_query(
+            "SELECT set_config('liyu.administrator',$1,true),set_config('liyu.reason',$2,true)",
+        )
+        .bind::<Text, _>(actor.id.to_string())
+        .bind::<Text, _>(reason)
+        .execute(conn)?;
+        let before = if create {
+            serde_json::Value::Null
+        } else {
+            sql_query("SELECT to_jsonb(c) AS data FROM catalog c WHERE id=$1 FOR UPDATE")
+                .bind::<Integer, _>(id)
+                .get_result::<crate::management::JsonRow>(conn)?
+                .data
+        };
+        let row = if create {
+            query.get_result::<Id>(conn)
+        } else {
+            query.bind::<Integer, _>(id).get_result::<Id>(conn)
+        }?;
+        let after = sql_query("SELECT to_jsonb(c) AS data FROM catalog c WHERE id=$1")
+            .bind::<BigInt, _>(row.id)
+            .get_result::<crate::management::JsonRow>(conn)?
+            .data;
+        crate::management::audit(
+            conn,
+            actor.id,
+            if create {
+                "product-create"
+            } else {
+                "product-update"
+            },
+            "catalog",
+            row.id,
+            reason,
+            before,
+            after,
+        )?;
+        Ok(row)
+    });
     match result {
         Ok(row) => res.render(Json(json!({"id":row.id}))),
         Err(diesel::result::Error::NotFound) => {
@@ -610,7 +686,6 @@ async fn upload_image(req: &mut Request, res: &mut Response) {
 pub(crate) fn routes() -> Router {
     Router::new()
         .push(Router::with_path("admin").get(page))
-        .push(Router::with_path("admin/app.js").get(script))
         .push(Router::with_path("admin/app.css").get(style))
         .push(Router::with_path("admin/api/login").post(login))
         .push(Router::with_path("admin/api/logout").post(logout))
@@ -622,6 +697,7 @@ pub(crate) fn routes() -> Router {
         )
         .push(Router::with_path("admin/api/products/{id}").put(update_product))
         .push(Router::with_path("admin/api/products/{id}/images/{variant}").post(upload_image))
+        .push(Router::with_path("admin/assets/{**path}").get(asset))
 }
 
 #[cfg(test)]

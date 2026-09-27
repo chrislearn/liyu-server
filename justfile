@@ -5,7 +5,7 @@ default:
     @just --list
 
 # Create the local development database if missing, then migrate and serve.
-dev:
+dev: build-admin
     python3 scripts/dev-db.py ensure
     cargo run --bin liyu-server
 
@@ -16,3 +16,7 @@ reset:
 # After a backup: add admin schema to an already migrated database, preserving rows.
 upgrade-admin:
     python3 scripts/upgrade-admin.py
+
+# Rebuild the Dioxus management interface served at /admin.
+build-admin:
+    python3 scripts/build-admin.py

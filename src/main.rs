@@ -1,11 +1,13 @@
 mod admin;
 mod avatar;
+mod benefits;
 mod catalog;
 mod commerce;
 mod config;
 mod demo_logistics;
 mod fulfillment;
 mod gifting;
+mod management;
 mod profile;
 mod schema;
 mod wishlist;
@@ -79,7 +81,7 @@ fn session_owner(
     conn: &mut PgConnection,
     secret_hash: &str,
 ) -> Result<Option<i64>, diesel::result::Error> {
-    diesel::sql_query("SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > now()")
+    diesel::sql_query("SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > now() AND EXISTS (SELECT 1 FROM users u WHERE u.id=sessions.user_id AND u.is_active)")
         .bind::<Text, _>(secret_hash)
         .get_result::<SessionOwner>(conn)
         .optional()
@@ -195,7 +197,11 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
         Ok(found) => found,
         Err(_) => return error(res, StatusCode::UNAUTHORIZED, "account not found"),
     };
-    if stored_hash != hash_secret(&body.password) {
+    let active = diesel::sql_query("SELECT id AS user_id FROM users WHERE id=$1 AND is_active")
+        .bind::<BigInt, _>(uid)
+        .get_result::<SessionOwner>(&mut conn)
+        .is_ok();
+    if !active || stored_hash != hash_secret(&body.password) {
         return error(res, StatusCode::UNAUTHORIZED, "invalid password");
     }
     let token = new_session_token();
@@ -328,6 +334,7 @@ async fn main() {
         conn.run_pending_migrations(MIGRATIONS)
             .expect("run migrations");
         admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
+        management::ensure_schema(&mut conn).expect("upgrade management schema");
         admin::bootstrap(&mut conn).expect("initialize administrator");
     }
     DB.set(db)
@@ -335,6 +342,8 @@ async fn main() {
     let router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(admin::routes())
+        .push(management::routes())
+        .push(benefits::routes())
         .push(Router::with_path("api/v1/auth/register").post(register))
         .push(Router::with_path("api/v1/auth/login").post(login))
         .push(Router::with_path("api/v1/auth/logout").post(logout))

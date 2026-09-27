@@ -1,6 +1,6 @@
 # LiYu 服务端与客户端落地清单
 
-更新：2026-09-26。依据 `OctoSense/liyu/docs/01–05`、`apps/liyu/src/data.rs`、`apps/liyu/src/lib.rs` 和当前 `liyu-server`。本文件是实施清单；`[ ]` 尚未完成，`[x]` 已有可验证实现。先完成领域 API 和隐私测试，再让在线 app 用这些 API；不能把现有单用户 `PUT /api/v1/state` 当作多人协作的最终协议。
+更新：2026-09-27。依据 `OctoSense/liyu/docs/01–05`、`apps/liyu/src/data.rs`、`apps/liyu/src/lib.rs` 和当前 `liyu-server`。本文件是实施清单；`[ ]` 尚未完成，`[x]` 已有可验证实现。先完成领域 API 和隐私测试，再让在线 app 用这些 API；不能把现有单用户 `PUT /api/v1/state` 当作多人协作的最终协议。
 
 ## 0. 现状与必须先纠正的边界
 
@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | 注册、登录、登出、会话续期 | `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/refresh`, `GET /me` | 服务端 30 天会话到期、登出撤销、原子轮换已实现；app 资料页可注册/登录/切换账号，但目前仅资料及购物车 API 使用此身份，礼盒/心愿仍有独立离线演示状态，客户端 token 到期自动续期未做。测试密码与注册验证码均 `123456`，不发送邮件短信。 |
 | 个人资料 | `GET/PATCH /me/profile`（display_name、avatar_url 白名单）；`PUT /me/phone`, `PUT /me/email`（测试码）；后续 `PUT /me/password` | 显示名、手机、邮箱 API 和资料页编辑已接入；服务端断开时资料可在本机演示。手机号/邮箱不得出现在公开资料。密码修改待做。 |
-| 头像 | `POST /me/avatar`（JPEG/PNG/WebP ≤1 MiB、16–4096 px、魔数嗅探+完整解码校验），`DELETE /me/avatar`；`GET /media/avatars/{id}`（公开、immutable 缓存） | 服务端已实现二进制上传/替换/删除，UUID 文件名存于 `assets/avatars/`，数据库只存媒体记录与 URL 指针，事务内原子切换；服务端裁剪与 app 端选择/预览/上传接入待做。 |
+| 头像 | `POST /me/avatar`（JPEG/PNG/WebP ≤1 MiB、16–4096 px、魔数嗅探+完整解码校验），`DELETE /me/avatar`；`GET /media/avatars/{id}`（公开、immutable 缓存） | 服务端已实现二进制上传/替换/删除，UUID 文件名存于 `LIYU_DATA_DIR/avatars/`，数据库只存媒体记录与 URL 指针，事务内原子切换；服务端裁剪与 app 端选择/预览/上传接入待做。 |
 | 收货地址 | `GET/POST /me/addresses`, `PUT/DELETE /me/addresses/{id}` | 服务端 owner-only CRUD 与 app 地址簿新增/编辑/删除已完成；送礼人不能读取。 |
 | 通知偏好 | `GET/PATCH /me/settings` | UI 已有三个提醒开关和主题；本地偏好与服务端通知偏好分开。 |
 | 商品分类、搜索、详情 | `GET /catalog/categories`, `GET /catalog?category=&q=&cursor=`, `GET /catalog/{id}` | 服务端已对齐 33 件；app 商品详情会读取服务器名称、描述和价格，商品主列表仍读本地目录，需进一步接入在线搜索/分页。 |
@@ -85,3 +85,7 @@
 - B：商品全量种子、原创演示图、目录 API 与购物车/订单。
 - C：心愿、礼物状态、物流投影与隐私黑盒测试。
 - 集成：迁移冲突处理、路由拼接、在线客户端数据层、双账户 E2E。每组使用独立模块与迁移序号；共享 DTO/表结构先在本文件定稿，任何涉及隐私字段的输出先写负向测试。
+
+## 2026-09-27 管理扩展对账
+
+参见 admin-management.md。服务端已加入优惠券设置/发放/结算核销、回收规则及 recovery-quote/exchange/cash-out、不可变钱包账本和撤回/发现过期退款、定向通知和已读。上述表中“尚待实现”的换礼/钱包/通知服务端部分以本段及当前 API 为准；消费端在线接入仍未完成。钱包当前 GET /wallet 返回余额与最近 100 笔，独立流水分页/测试充值未做；通知当前为人工定向发布，自动业务提醒和偏好同步未做。

@@ -259,8 +259,30 @@ async fn quote(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
+    let coupon = match crate::benefits::coupon_id(req) {
+        Ok(v) => v,
+        Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid coupon id"),
+    };
     match cart(&mut conn, uid) {
-        Ok(rows) if !rows.is_empty() => res.render(Json(cart_json(&rows))),
+        Ok(rows) if !rows.is_empty() => {
+            let items = rows
+                .iter()
+                .map(|r| (r.product_id, r.price_cents))
+                .collect::<Vec<_>>();
+            match conn.transaction::<_, diesel::result::Error, _>(|conn| {
+                crate::benefits::discount(conn, uid, coupon, &items)
+            }) {
+                Ok((discount, _)) => {
+                    let mut data = cart_json(&rows);
+                    data["subtotal_cents"] = data["total_cents"].clone();
+                    data["discount_cents"] = json!(discount);
+                    data["total_cents"] =
+                        json!(items.iter().map(|(_, p)| p).sum::<i64>() - discount);
+                    res.render(Json(data));
+                }
+                Err(_) => error(res, StatusCode::CONFLICT, "coupon unavailable"),
+            }
+        }
         Ok(_) => error(res, StatusCode::BAD_REQUEST, "cart is empty"),
         Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "quote failed"),
     }
@@ -270,6 +292,10 @@ async fn quote(req: &mut Request, res: &mut Response) {
 async fn create_order(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
+    };
+    let coupon = match crate::benefits::coupon_id(req) {
+        Ok(v) => v,
+        Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid coupon id"),
     };
     let key = req
         .headers()
@@ -284,6 +310,7 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
     let result = conn.transaction::<OrderRow, diesel::result::Error, _>(|conn| {
+        sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
         let prior: QueryResult<OrderRow> = sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
             .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result(conn);
         if let Ok(order) = prior { return Ok(order); }
@@ -301,12 +328,14 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         }
         let total = rows.iter().try_fold(0_i64, |sum, row| sum.checked_add(row.price_cents))
             .ok_or(diesel::result::Error::RollbackTransaction)?;
-        let order: OrderRow = sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key) VALUES ($1,$2,$3) RETURNING id,total_cents,status")
-            .bind::<BigInt,_>(uid).bind::<BigInt,_>(total).bind::<Text,_>(key).get_result(conn)?;
-        for row in rows {
+        let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&rows.iter().map(|r|(r.product_id,r.price_cents)).collect::<Vec<_>>())?;
+        let order: OrderRow = sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,total_cents,status")
+            .bind::<BigInt,_>(uid).bind::<BigInt,_>(total-discount).bind::<Text,_>(key).bind::<BigInt,_>(total).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).get_result(conn)?;
+        crate::benefits::reserve(conn,uid,coupon,order.id)?;
+        for (index,row) in rows.into_iter().enumerate() {
             sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id) VALUES ($1,$2,$3,$4,$5)")
                 .bind::<BigInt,_>(order.id).bind::<Integer,_>(row.product_id)
-                .bind::<BigInt,_>(row.recipient_id).bind::<BigInt,_>(row.price_cents)
+                .bind::<BigInt,_>(row.recipient_id).bind::<BigInt,_>(row.price_cents-allocated[index])
                 .bind::<Nullable<BigInt>,_>(row.wish_item_id).execute(conn)?;
         }
         sql_query("DELETE FROM cart_items WHERE user_id=$1").bind::<BigInt,_>(uid).execute(conn)?;
@@ -397,10 +426,13 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
     let result = conn.transaction::<OrderRow, diesel::result::Error, _>(|conn| {
+        sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
         let order: OrderRow = sql_query("SELECT id,total_cents,status FROM orders WHERE id=$1 AND buyer_id=$2 FOR UPDATE")
             .bind::<BigInt,_>(oid).bind::<BigInt,_>(uid).get_result(conn)?;
         if order.status == "paid_test" { return Ok(order); }
         if order.status != "pending" { return Err(diesel::result::Error::RollbackTransaction); }
+        crate::benefits::redeem(conn,oid)?;
+        sql_query("SELECT set_config('liyu.reason','test payment',true)").execute(conn)?;
         let items: Vec<OrderItemRow> = sql_query("SELECT id,product_id,recipient_id,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
             .bind::<BigInt,_>(oid).load(conn)?;
         // Lock/update products in stable ID order; repeated items reserve their total quantity.

@@ -11,3 +11,7 @@ tmp/*
 # Runtime media; deterministic product fixtures remain tracked.
 /test-data/avatars/
 /test-data/products/admin-*/
+/admin-ui/target/
+/admin-ui/dist/
+/web/dist/
+/web/dist-next/
