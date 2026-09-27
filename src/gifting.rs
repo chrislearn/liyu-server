@@ -73,6 +73,8 @@ struct SenderView {
     recipient_id: i64,
     #[diesel(sql_type = Text)]
     recipient_name: String,
+    #[diesel(sql_type = Text)]
+    notification_status: String,
     #[diesel(sql_type = Integer)]
     product_id: i32,
     #[diesel(sql_type = BigInt)]
@@ -95,12 +97,12 @@ const GIFT_VIEW_SELECT: &str = "SELECT g.id,g.sender_id, \
     FROM gifts g JOIN users su ON su.id=g.sender_id \
     JOIN catalog c ON c.id=g.product_id";
 
-const SENDER_VIEW_SELECT: &str = "SELECT g.id,g.recipient_id,ru.display_name AS recipient_name, \
-    g.product_id,g.price_cents,g.state, \
+const SENDER_VIEW_SELECT: &str = "SELECT g.id,COALESCE(g.recipient_id,0) AS recipient_id,COALESCE(NULLIF(g.recipient_contact->>'label',''),g.recipient_contact->>'value',ru.display_name,'待领取') AS recipient_name, \
+    g.product_id,g.price_cents,g.state,COALESCE((SELECT status FROM delivery_outbox o WHERE o.gift_id=g.id),'in_app') AS notification_status, \
     (g.expires_at<=now() AND g.state IN ('sealed','opened')) AS expired, \
     (s.delivered_at IS NOT NULL) AS carrier_delivered, \
     (s.recipient_confirmed_at IS NOT NULL) AS recipient_confirmed \
-    FROM gifts g JOIN users ru ON ru.id=g.recipient_id \
+    FROM gifts g LEFT JOIN users ru ON ru.id=g.recipient_id \
     LEFT JOIN shipments s ON s.gift_id=g.id";
 
 #[derive(QueryableByName)]
@@ -180,7 +182,9 @@ fn sender_state(g: &SenderView) -> &str {
 fn sender_projection(g: SenderView) -> Value {
     json!({
         "id": g.id,
-        "recipient": {"id":g.recipient_id,"display_name":g.recipient_name},
+        "recipient": {"display_name":g.recipient_name},
+        "delivery_status":if g.recipient_id==0 {"pending_claim"}else{"assigned"},
+        "notification_status":g.notification_status,
         "product_id": g.product_id,
         "price_cents": g.price_cents,
         "state": sender_state(&g),
@@ -633,6 +637,7 @@ mod tests {
             id: 5,
             recipient_id: 2,
             recipient_name: "林舟".into(),
+            notification_status: "in_app".into(),
             product_id: 17,
             price_cents: 89900,
             state: state.into(),
@@ -672,7 +677,9 @@ mod tests {
             view,
             json!({
                 "id": 5,
-                "recipient": {"id":2,"display_name":"林舟"},
+                "recipient": {"display_name":"林舟"},
+                "delivery_status":"assigned",
+                "notification_status":"in_app",
                 "product_id": 17,
                 "price_cents": 89900,
                 "state": "handled",

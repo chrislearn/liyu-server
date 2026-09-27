@@ -1,6 +1,6 @@
 # LiYu test server
 
-Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, current gaps, API inventory and privacy matrix are in [todos/app-api.md](todos/app-api.md). This is a local test backend: no SMS/email, real payment or carrier integration. Bind to loopback by default; fixed test credentials must never be exposed publicly.
+Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, current gaps, API inventory and privacy matrix are in [todos/app-api.md](todos/app-api.md). This backend keeps test payment and carrier flows; contact gifting now has verified identities and a configurable SMS/email delivery bridge. See [contact delivery](docs/contact-delivery.md). Bind to loopback by default; fixed test credentials must never be exposed publicly.
 
 ## Run
 
@@ -15,16 +15,18 @@ The default `DATABASE_URL` is `postgres://root:root@127.0.0.1:5432/liyu_dev`. `j
 
 To clear all development data, stop the server and run `just reset`, then `just dev`. Reset forcibly disconnects database clients, drops `liyu_dev` and recreates it; the next startup restores the schema and demo seeds. Database management refuses URLs pointing outside the local `liyu_dev` database.
 
-Seed users: `demo@liyu.test`, `linzhou@liyu.test`, `chenxiao@liyu.test`; every password is `123456`. Registration also requires verification code `123456`. Identifiers are arbitrary test strings; no real phone or email is needed. The catalog has 33 stable IDs matching the app. Product images and their provenance are in `test-data/products/`.
+Seed users: `demo@liyu.test`, `linzhou@liyu.test`, `chenxiao@liyu.test`; every password is `123456`. `just dev` explicitly enables `LIYU_TEST_DELIVERY=true` unless overridden. For phone/email registration, first request `/api/v1/auth/challenges`, then submit its `challenge_id` and code; test replies expose `test_code`. Direct server startup defaults to real verification, with random codes and no code in the response. Arbitrary test identifiers are allowed only in explicit test mode. The catalog has 33 stable IDs matching the app. Product images and their provenance are in `test-data/products/`.
 
 ```powershell
 $base = 'http://127.0.0.1:8787'
 $login = Invoke-RestMethod "$base/api/v1/auth/login" -Method Post -ContentType 'application/json' -Body '{"identifier":"demo@liyu.test","password":"123456"}'
 $headers = @{Authorization="Bearer $($login.token)"}
-Invoke-RestMethod "$base/api/v1/auth/register" -Method Post -ContentType 'application/json' -Body '{"identifier":"new-user","display_name":"新用户","password":"123456","code":"123456"}'
+$challenge = Invoke-RestMethod "$base/api/v1/auth/challenges" -Method Post -ContentType 'application/json' -Body '{"kind":"email","value":"new@example.test","purpose":"register"}'
+$registration = @{ identifier='new@example.test'; password='new-password-2026'; code=$challenge.test_code; challenge_id=$challenge.challenge_id } | ConvertTo-Json
+Invoke-RestMethod "$base/api/v1/auth/register" -Method Post -ContentType 'application/json' -Body $registration
 ```
 
-Session tokens expire 30 days after issuance. `POST /auth/refresh` takes the current Bearer token and returns a new token plus `expires_in_seconds`; the old token is revoked atomically. `POST /auth/logout` takes the Bearer token and returns `204`, immediately revoking it. Expired or revoked tokens receive `401` and cannot refresh. The test password and registration code remain `123456`.
+Session tokens expire 30 days after issuance. `POST /auth/refresh` takes the current Bearer token and returns a new token plus `expires_in_seconds`; the old token is revoked atomically. `POST /auth/logout` takes the Bearer token and returns `204`, immediately revoking it. Expired or revoked tokens receive `401` and cannot refresh. Legacy seeded account passwords remain `123456`; new accounts use salted Argon2 passwords. Registration and binding use an expiring, one-use challenge even in test mode for phone/email identities.
 
 ```powershell
 $refreshed = Invoke-RestMethod "$base/api/v1/auth/refresh" -Method Post -Headers $headers
@@ -64,7 +66,7 @@ Admin endpoints are `/admin/api/login`, `/logout`, `/me`, `/products` (GET/POST)
 
 Profiles without an uploaded avatar return `/api/v1/media/default-avatars/{user_id}` in `avatar_url`. This endpoint serves a deterministic 140×140 PNG identicon derived from the user ID, so it stays the same across logins and server restarts without storing an extra file. Uploaded avatars take precedence; deleting an upload restores the same default avatar on the next profile read.
 
-The schema now ships as a single `migrations/20260926000000_init/` pair. A database that was built by the old incremental migration chain (profile, catalog, fulfillment, commerce, wishlist, gifting, demo_logistics, wish_claim, session_expiry — with or without the short-lived `20260926100000_avatars`) has those version strings recorded in `__diesel_schema_migrations`, which the consolidated migration does not match. Pointing the new binary at such a database either replays the whole init script (`relation "users" already exists`) or skips it and silently misses the `avatars` table.
+The consolidated baseline remains `migrations/20260926000000_init/`. The additive `20260928000000_contact_delivery` migration upgrades an existing consolidated database without rebuilding it. The older pre-consolidation boundary described below still requires explicit reconciliation. A database that was built by the old incremental migration chain (profile, catalog, fulfillment, commerce, wishlist, gifting, demo_logistics, wish_claim, session_expiry — with or without the short-lived `20260926100000_avatars`) has those version strings recorded in `__diesel_schema_migrations`, which the consolidated migration does not match. Pointing the new binary at such a database either replays the whole init script (`relation "users" already exists`) or skips it and silently misses the `avatars` table.
 
 For this local test backend the safe options are:
 
@@ -80,9 +82,9 @@ For this local test backend the safe options are:
      INSERT INTO __diesel_schema_migrations (version, run_on)
      VALUES ('20260926000000', now());
      ```
-   - Restart and confirm the server boots without running further migrations.
+   - Restart and confirm the additive contact-delivery migration applies successfully, then is skipped on subsequent starts.
 
-Do not edit `up.sql` to "make it fit" an old database; the single migration must stay an exact description of a fresh database.
+Do not edit `up.sql` to "make it fit" an old database; the baseline migration must stay an exact description of its original schema.
 
 ## Current REST surface
 
@@ -93,7 +95,7 @@ All paths below are under `/api/v1`, except `/health`. Authenticated endpoints n
 | Auth | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /me` |
 | Profile | `GET/PATCH /me/profile`, `PUT /me/phone`, `PUT /me/email`, `GET/POST /me/addresses`, `PUT/DELETE /me/addresses/{id}`, `POST/DELETE /me/avatar`, `GET /media/avatars/{id}` |
 | Catalog | `GET /catalog/categories`, `GET /catalog?category=&q=&cursor=&limit=`, `GET /catalog/{id}`, `GET /media/products/{id}/{variant}` (`thumb`, `card`, `detail`) |
-| Friends and wishlists | `GET /friends`, `POST /friend-requests`, `POST /friend-requests/{id}/accept`, `GET/POST /wishlists`, `GET/PATCH/DELETE /wishlists/{id}`, `POST /wishlists/{id}/close`, `POST/DELETE /wishlists/{id}/items`, `GET /friends/{id}/wishlists` |
+| Friends and wishlists | `GET /friends`, `POST /friends/requests`, `POST /friends/requests/{id}/accept`, `GET/POST /wishlists`, `GET/PATCH/DELETE /wishlists/{id}`, `POST /wishlists/{id}/close`, `POST/DELETE /wishlists/{id}/items`, `GET /friends/{id}/wishlists` |
 | Cart and test orders | `GET/DELETE /cart`, `POST /cart/items`, `DELETE /cart/items/{id}`, `POST /orders/quote`, `GET/POST /orders`, `GET /orders/{id}`, `POST /orders/{id}/pay-test` |
 | Gifts | `GET /gifts/inbox`, `GET /gifts/outbox`, `GET /gifts/{id}`, `PUT /gifts/{id}/puzzle`, `POST /gifts/{id}/open`, `/answer`, `/accept`, `/withdraw` |
 | Shipment privacy | `GET /shipments/{gift_id}` and `POST /shipments/{gift_id}/confirm-receipt` for the recipient; `GET /gifts/{gift_id}/delivery-summary` for the sender |

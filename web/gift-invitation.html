@@ -1,0 +1,14 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>领取礼物 · 礼遇</title>
+<style>body{font:16px system-ui;background:#f5f7f5;color:#234;margin:0}main{max-width:440px;margin:8vh auto;padding:24px;background:white;border-radius:16px}input,button,select{box-sizing:border-box;width:100%;padding:12px;margin:6px 0;font:inherit}button{background:#176b57;color:white;border:0;border-radius:8px}#status{white-space:pre-wrap}</style>
+<main><h1>有一份礼物等你领取</h1><p>使用收到邀请的手机号或邮箱验证身份。已有账号请先登录，再验证此联系方式。</p>
+<select id="mode"><option value="register">注册并领取</option><option value="login">登录已有账号并领取</option></select>
+<input style="display:none" id="identity" placeholder="登录手机号或邮箱" autocomplete="username"><input id="password" type="password" placeholder="密码（至少 8 位）" autocomplete="current-password">
+<input id="contact" placeholder="收到邀请的手机号或邮箱"><button id="request">获取验证码</button><input id="code" placeholder="验证码" inputmode="numeric"><button id="submit">验证并领取</button><p id="status" role="status"></p></main>
+<script>
+let challenge='',token='',requested='',purpose='';const el=id=>document.getElementById(id);const kind=v=>v.includes('@')?'email':'phone';
+function reset(){challenge='';token='';purpose='';el('status').textContent='请为当前联系方式重新获取验证码。'}
+el('mode').onchange=()=>{reset();el('identity').style.display=el('mode').value==='login'?'block':'none';};el('identity').oninput=reset;el('password').oninput=reset;
+async function api(path,data){const r=await fetch('/api/v1/'+path,{method:path.startsWith('me/')?'PUT':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(data)});const v=await r.json();if(!r.ok)throw Error(v.error||'操作失败');return v}
+el('request').onclick=async()=>{try{token='';purpose=el('mode').value==='login'?'bind':'register';if(purpose==='bind')token=(await api('auth/login',{identifier:el('identity').value,password:el('password').value})).token;requested=el('contact').value.trim();const r=await api('auth/challenges',{kind:kind(requested),value:requested,purpose});challenge=r.challenge_id;el('status').textContent=r.test_code?'测试通道验证码：'+r.test_code:'验证码已加入投递队列，请查收。'}catch(e){el('status').textContent=e.message}};
+el('submit').onclick=async()=>{try{if(!challenge||requested!==el('contact').value.trim())throw Error('请先为当前联系方式获取验证码');if(purpose==='register')token=(await api('auth/register',{identifier:requested,password:el('password').value,code:el('code').value,challenge_id:challenge})).token;else await api('me/'+(kind(requested)==='phone'?'phone':'email'),{value:requested,code:el('code').value,challenge_id:challenge});const invitation=location.pathname.split('/').pop();await api('gift-invitations/'+encodeURIComponent(invitation)+'/claim',{});el('status').textContent='领取成功，请打开礼遇 App，登录同一账号后在礼盒查看。';challenge='';}catch(e){el('status').textContent=e.message}};
+</script></html>

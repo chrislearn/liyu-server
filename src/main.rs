@@ -4,6 +4,7 @@ mod benefits;
 mod catalog;
 mod commerce;
 mod config;
+mod contact_delivery;
 mod demo_logistics;
 mod fulfillment;
 mod gifting;
@@ -46,6 +47,7 @@ struct Credentials {
     password: String,
     code: Option<String>,
     display_name: Option<String>,
+    challenge_id: Option<String>,
 }
 
 pub(crate) fn pool() -> &'static DbPool {
@@ -149,44 +151,102 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
         Ok(body) => body,
         Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid JSON"),
     };
-    let identity = body.identifier.trim().to_lowercase();
+    let identity_kind = if body.identifier.contains('@') {
+        "email"
+    } else {
+        "phone"
+    };
+    let identity = contact_delivery::normalize(identity_kind, &body.identifier)
+        .unwrap_or_else(|| body.identifier.trim().into())
+        .to_lowercase();
     if identity.is_empty() || identity.len() > 254 {
         return error(res, StatusCode::BAD_REQUEST, "invalid identifier");
     }
-    if is_register && body.code.as_deref() != Some(TEST_CODE) {
-        return error(res, StatusCode::BAD_REQUEST, "invalid test code");
-    }
-    if body.password != TEST_CODE {
-        return error(res, StatusCode::UNAUTHORIZED, "invalid password");
-    }
+
     let mut conn = match pool().get() {
         Ok(conn) => conn,
         Err(_) => return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
     };
     if is_register {
+        let default_name = identity.chars().take(50).collect::<String>();
         let name = body
             .display_name
             .as_deref()
-            .unwrap_or(identity.as_str())
+            .unwrap_or(default_name.as_str())
             .trim();
         if name.is_empty() || name.chars().count() > 50 {
             return error(res, StatusCode::BAD_REQUEST, "invalid display name");
         }
-        let inserted = diesel::insert_into(users)
-            .values((
-                identifier.eq(&identity),
-                display_name.eq(name),
-                password_hash.eq(hash_secret(&body.password)),
-            ))
-            .on_conflict(identifier)
-            .do_nothing()
-            .execute(&mut conn);
-        if inserted != Ok(1) {
+        let kind = if identity.contains('@') {
+            "email"
+        } else {
+            "phone"
+        };
+        let contact = contact_delivery::normalize(kind, &body.identifier);
+        if body.password.len() > 128 {
+            return error(res, StatusCode::BAD_REQUEST, "password too long");
+        }
+        if body.password.len() < 8 && !(contact_delivery::test_mode() && body.password == TEST_CODE)
+        {
             return error(
                 res,
-                StatusCode::CONFLICT,
-                "account already exists or database error",
+                StatusCode::BAD_REQUEST,
+                "password must contain at least 8 bytes",
             );
+        }
+        let result = conn.transaction::<Option<i64>, diesel::result::Error, _>(|conn| {
+            if let Some(value) = &contact {
+                if !contact_delivery::verify(
+                    conn,
+                    body.challenge_id.as_deref().unwrap_or(""),
+                    kind,
+                    value,
+                    "register",
+                    None,
+                    body.code.as_deref().unwrap_or(""),
+                )? {
+                    return Ok(None);
+                }
+            } else if !(contact_delivery::test_mode() && body.code.as_deref() == Some(TEST_CODE)) {
+                return Ok(None);
+            }
+            let salt =
+                argon2::password_hash::SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes())
+                    .unwrap();
+            use argon2::PasswordHasher;
+            let password = argon2::Argon2::default()
+                .hash_password(body.password.as_bytes(), &salt)
+                .unwrap()
+                .to_string();
+            let uid = diesel::insert_into(users)
+                .values((
+                    identifier.eq(&identity),
+                    display_name.eq(name),
+                    password_hash.eq(&password),
+                ))
+                .returning(id)
+                .get_result::<i64>(conn)?;
+            if let Some(value) = &contact {
+                contact_delivery::attach(conn, uid, kind, value)?;
+            }
+            Ok(Some(uid))
+        });
+        match result {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error(
+                    res,
+                    StatusCode::BAD_REQUEST,
+                    "verification required or invalid code",
+                )
+            }
+            Err(_) => {
+                return error(
+                    res,
+                    StatusCode::CONFLICT,
+                    "account or contact already exists",
+                )
+            }
         }
     }
     let found: Result<(i64, String, String), _> = users
@@ -201,7 +261,17 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
         .bind::<BigInt, _>(uid)
         .get_result::<SessionOwner>(&mut conn)
         .is_ok();
-    if !active || stored_hash != hash_secret(&body.password) {
+    use argon2::PasswordVerifier;
+    let password_ok = if stored_hash.starts_with("$argon2") {
+        argon2::password_hash::PasswordHash::new(&stored_hash).is_ok_and(|hash| {
+            argon2::Argon2::default()
+                .verify_password(body.password.as_bytes(), &hash)
+                .is_ok()
+        })
+    } else {
+        stored_hash == hash_secret(&body.password)
+    };
+    if !active || !password_ok {
         return error(res, StatusCode::UNAUTHORIZED, "invalid password");
     }
     let token = new_session_token();
@@ -220,6 +290,7 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
     res.render(Json(json!({
         "token": token,
         "expires_in_seconds": SESSION_TTL_SECONDS,
+        "test_delivery":contact_delivery::test_mode(),
         "user": {"id": uid, "identifier": identity, "display_name": name}
     })));
 }
@@ -331,6 +402,19 @@ async fn main() {
         .expect("connect to PostgreSQL");
     {
         let mut conn = db.get().expect("get database connection");
+        use diesel::sql_types::Bool;
+        #[derive(QueryableByName)]
+        struct Installed {
+            #[diesel(sql_type=Bool)]
+            installed: bool,
+        }
+        let old = diesel::sql_query("SELECT to_regclass('public.users') IS NOT NULL AS installed")
+            .get_result::<Installed>(&mut conn)
+            .expect("inspect schema");
+        if old.installed {
+            admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
+            management::ensure_schema(&mut conn).expect("upgrade management schema");
+        }
         conn.run_pending_migrations(MIGRATIONS)
             .expect("run migrations");
         admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
@@ -339,11 +423,14 @@ async fn main() {
     }
     DB.set(db)
         .unwrap_or_else(|_| panic!("database already initialized"));
+    contact_delivery::validate_config().expect("valid contact delivery configuration");
+    contact_delivery::start_worker();
     let router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(admin::routes())
         .push(management::routes())
         .push(benefits::routes())
+        .push(contact_delivery::routes())
         .push(Router::with_path("api/v1/auth/register").post(register))
         .push(Router::with_path("api/v1/auth/login").post(login))
         .push(Router::with_path("api/v1/auth/logout").post(logout))

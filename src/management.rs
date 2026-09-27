@@ -49,7 +49,7 @@ pub(crate) fn audit(
 
 fn report_sql(module: &str) -> Option<&'static str> {
     Some(match module {
-        "users" => "SELECT u.id,u.identifier,u.display_name,u.is_active,u.created_at,p.phone,p.email,(SELECT count(*) FROM sessions s WHERE s.user_id=u.id AND expires_at>now()) AS sessions,(SELECT COALESCE(sum(amount_cents),0) FROM wallet_ledger w WHERE w.user_id=u.id) AS balance_cents FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id",
+        "users" => "SELECT u.id,u.identifier,u.display_name,u.is_active,u.created_at,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='phone'),p.phone) AS phone,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='email'),p.email) AS email,(SELECT count(*) FROM sessions s WHERE s.user_id=u.id AND expires_at>now()) AS sessions,(SELECT COALESCE(sum(amount_cents),0) FROM wallet_ledger w WHERE w.user_id=u.id) AS balance_cents FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id",
         "low-stock" => "SELECT id,name,category,price_cents,stock,is_active FROM catalog WHERE is_active AND stock<=10",
         "inventory" | "prices" => "SELECT id,name,category,price_cents,stock,is_active FROM catalog",
         "history" => "SELECT * FROM catalog_history",
@@ -64,6 +64,7 @@ fn report_sql(module: &str) -> Option<&'static str> {
         "wishlists" => "SELECT w.*,(SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id) AS item_count,(SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id AND claimed_gift_id IS NOT NULL) AS claimed_count,(SELECT jsonb_agg(jsonb_build_object('id',i.id,'product_id',i.product_id,'kind',i.kind,'claimed_gift_id',i.claimed_gift_id)) FROM wishlist_items i WHERE i.wishlist_id=w.id) AS items FROM wishlists w",
         "contracts" => "SELECT g.id,g.sender_id,g.recipient_id,g.contract_text,g.state AS gift_state,CASE WHEN g.state IN ('cashed_out','exchanged','withdrawn','expired') THEN 'voided' ELSE COALESCE(c.status,'pending') END AS status,c.updated_at FROM gifts g LEFT JOIN gift_contracts c ON c.gift_id=g.id WHERE g.contract_text<>''",
         "notifications" => "SELECT * FROM notifications",
+        "deliveries" => "SELECT id,event_key,gift_id,kind,status,attempts,next_attempt_at,last_error,created_at,sent_at FROM delivery_outbox",
         "audit" => "SELECT a.*,u.username FROM admin_audit a LEFT JOIN administrators u ON u.id=a.administrator_id",
         _ => return None,
     })
@@ -160,6 +161,7 @@ fn command(action: &str, v: &Value) -> Option<(&'static str, &'static str, &'sta
         "remove-friend" => ("friendships","SELECT to_jsonb(f) AS data FROM friendships f WHERE id=$2 FOR UPDATE","DELETE FROM friendships WHERE id=$2 AND $1 IS NOT NULL RETURNING to_jsonb(friendships) AS data"),
         "contract" if choice(v,"status",&["fulfilled","waived"]) => ("gift_contracts","SELECT jsonb_build_object('id',g.id,'status',COALESCE(c.status,'pending')) AS data FROM gifts g LEFT JOIN gift_contracts c ON c.gift_id=g.id WHERE g.id=$2 AND g.contract_text<>'' AND g.state='accepted' FOR UPDATE OF g","INSERT INTO gift_contracts(gift_id,status) VALUES($2,$1->>'status') ON CONFLICT(gift_id) DO UPDATE SET status=excluded.status,updated_at=now() WHERE gift_contracts.status='pending' RETURNING to_jsonb(gift_contracts) AS data"),
         "notify" if text(v,"title",1,100) && text(v,"body",0,2000) && integer(v,"user_id",1,i64::MAX) && text(v,"expires_at",1,40) => ("notifications","SELECT to_jsonb(n) AS data FROM notifications n WHERE id=$2 FOR UPDATE","INSERT INTO notifications(user_id,title,body,expires_at) SELECT ($1->>'user_id')::bigint,$1->>'title',$1->>'body',($1->>'expires_at')::timestamptz WHERE $2=0 AND ($1->>'expires_at')::timestamptz>now() RETURNING to_jsonb(notifications) AS data"),
+        "retry-delivery" => ("delivery_outbox","SELECT to_jsonb(o)-'payload'-'destination' AS data FROM delivery_outbox o WHERE id=$2 FOR UPDATE","UPDATE delivery_outbox o SET status='pending',attempts=0,next_attempt_at=now(),lease_until=NULL,last_error=NULL WHERE id=$2 AND $1 IS NOT NULL AND status IN ('pending','failed') AND payload<>'{}'::jsonb AND ((gift_id IS NULL AND created_at>now()-interval '10 minutes') OR EXISTS(SELECT 1 FROM gifts g WHERE g.id=o.gift_id AND g.recipient_id IS NULL AND g.state='sealed' AND g.expires_at>now())) RETURNING to_jsonb(o)-'payload'-'destination' AS data"),
         "revoke-notification" => ("notifications","SELECT to_jsonb(n) AS data FROM notifications n WHERE id=$2 FOR UPDATE","UPDATE notifications SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$2 AND $1 IS NOT NULL RETURNING to_jsonb(notifications) AS data"),
         _=>return None,
     })

@@ -6,8 +6,6 @@ use serde_json::json;
 
 use crate::schema::{shipping_addresses, user_profiles, users};
 
-const TEST_CODE: &str = "123456";
-
 #[derive(Deserialize)]
 struct ProfilePatch {
     display_name: Option<String>,
@@ -18,6 +16,7 @@ struct ProfilePatch {
 struct ContactBind {
     value: String,
     code: String,
+    challenge_id: String,
 }
 
 #[derive(Deserialize)]
@@ -62,15 +61,6 @@ fn valid_phone(s: &str) -> bool {
     s.len() == 11 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn valid_email(s: &str) -> bool {
-    let s = s.trim();
-    s.len() <= 254
-        && !s.contains(char::is_whitespace)
-        && s.split_once('@').is_some_and(|(a, b)| {
-            !a.is_empty() && b.contains('.') && !b.starts_with('.') && !b.ends_with('.')
-        })
-}
-
 fn valid_avatar(s: &str) -> bool {
     s.is_empty()
         || (s.len() <= 512
@@ -91,12 +81,34 @@ fn profile_json(conn: &mut PgConnection, owner: i64) -> QueryResult<serde_json::
         .select((p::phone, p::email, p::avatar_url))
         .first(conn)
         .optional()?;
-    let (phone, email, avatar_url) = details.unwrap_or_default();
+    let (mut phone, mut email, avatar_url) = details.unwrap_or_default();
+    use diesel::sql_types::Jsonb;
+    #[derive(QueryableByName)]
+    struct ContactRow {
+        #[diesel(sql_type=Jsonb)]
+        data: serde_json::Value,
+    }
+    let verified=diesel::sql_query("SELECT jsonb_object_agg(kind,value) AS data FROM contact_identities WHERE user_id=$1 HAVING count(*)>0")
+        .bind::<diesel::sql_types::BigInt,_>(owner).get_result::<ContactRow>(conn).optional()?;
+    let phone_verified = verified
+        .as_ref()
+        .is_some_and(|r| r.data["phone"].is_string());
+    let email_verified = verified
+        .as_ref()
+        .is_some_and(|r| r.data["email"].is_string());
+    if let Some(row) = verified {
+        if let Some(s) = row.data["phone"].as_str() {
+            phone = Some(s.into())
+        }
+        if let Some(s) = row.data["email"].as_str() {
+            email = Some(s.into())
+        }
+    }
     let avatar_url = avatar_url
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| crate::avatar::default_url(id));
     Ok(
-        json!({"id":id,"identifier":identifier,"display_name":display_name,"phone":phone,"email":email,"avatar_url":avatar_url}),
+        json!({"id":id,"identifier":identifier,"display_name":display_name,"phone":phone,"email":email,"phone_verified":phone_verified,"email_verified":email_verified,"avatar_url":avatar_url}),
     )
 }
 
@@ -176,50 +188,40 @@ async fn bind_contact(req: &mut Request, res: &mut Response, phone_kind: bool) {
         Ok(body) => body,
         Err(_) => return fail(res, StatusCode::BAD_REQUEST, "invalid JSON"),
     };
-    if body.code != TEST_CODE {
-        return fail(res, StatusCode::BAD_REQUEST, "invalid test code");
-    }
-    let value = body.value.trim().to_lowercase();
-    if (phone_kind && !valid_phone(&value)) || (!phone_kind && !valid_email(&value)) {
+    let kind = if phone_kind { "phone" } else { "email" };
+    let Some(value) = crate::contact_delivery::normalize(kind, &body.value) else {
         return fail(res, StatusCode::BAD_REQUEST, "invalid contact value");
-    }
-    let Some(mut conn) = db(res) else { return };
-    let result = if phone_kind {
-        diesel::insert_into(user_profiles::table)
-            .values((
-                user_profiles::user_id.eq(owner),
-                user_profiles::phone.eq(Some(&value)),
-            ))
-            .on_conflict(user_profiles::user_id)
-            .do_update()
-            .set((
-                user_profiles::phone.eq(Some(&value)),
-                user_profiles::updated_at.eq(diesel::dsl::now),
-            ))
-            .execute(&mut conn)
-    } else {
-        diesel::insert_into(user_profiles::table)
-            .values((
-                user_profiles::user_id.eq(owner),
-                user_profiles::email.eq(Some(&value)),
-            ))
-            .on_conflict(user_profiles::user_id)
-            .do_update()
-            .set((
-                user_profiles::email.eq(Some(&value)),
-                user_profiles::updated_at.eq(diesel::dsl::now),
-            ))
-            .execute(&mut conn)
     };
+    let Some(mut conn) = db(res) else { return };
+    let result = conn.transaction::<bool, diesel::result::Error, _>(|conn| {
+        if !crate::contact_delivery::verify(
+            conn,
+            &body.challenge_id,
+            kind,
+            &value,
+            "bind",
+            Some(owner),
+            &body.code,
+        )? {
+            return Ok(false);
+        }
+        crate::contact_delivery::attach(conn, owner, kind, &value)?;
+        Ok(true)
+    });
     match result {
-        Ok(_) => match profile_json(&mut conn, owner) {
-            Ok(value) => res.render(Json(value)),
+        Ok(true) => match profile_json(&mut conn, owner) {
+            Ok(v) => res.render(Json(v)),
             Err(_) => fail(
                 res,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "profile query failed",
             ),
         },
+        Ok(false) => fail(
+            res,
+            StatusCode::BAD_REQUEST,
+            "verification required or invalid code",
+        ),
         Err(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation,
             _,
@@ -430,8 +432,8 @@ mod tests {
     fn rejects_bad_contacts_and_avatar_references() {
         assert!(valid_phone("13800138000"));
         assert!(!valid_phone("1380013800x"));
-        assert!(valid_email("demo@example.com"));
-        assert!(!valid_email("bad@"));
+        assert!(crate::contact_delivery::normalize("email", "demo@example.com").is_some());
+        assert!(crate::contact_delivery::normalize("email", "bad@").is_none());
         assert!(valid_avatar("https://cdn.example.com/avatar.png"));
         assert!(!valid_avatar("http://local/avatar.png"));
     }

@@ -28,12 +28,12 @@
 | 购物车 | `GET/DELETE /cart`, `POST /cart/items`, `DELETE /cart/items/{id}` 已有；目标再加 `PATCH /cart/items/{id}` | app 已可查看商品详情、选择已确认好友加购/移除、测试结算；断连只生成标明“本地模拟”的离线订单。购物车心愿商品入口、谜题/契约配置、订单历史尚未接入。 |
 | 报价、下单、测试支付 | `POST /orders/quote`, `POST /orders`（幂等键）, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/pay-test` 已有；目标再加礼物玩法/预约日/钱包流水与取消 | 服务端按商品快照价格在事务内下单、测试支付创建礼物；`wish_item_id` 在付款事务里加锁认领，竞争者得到 409。app 的普通商品购物车可结算，尚无钱包扣减或完整订单历史。 |
 | 心愿单 | `GET/POST /wishlists`, `GET/PATCH/DELETE /wishlists/{id}`, `POST /wishlists/{id}/close`, `GET /contacts/{id}/wishlists` | 服务端发布/编辑/结束/删除、好友受众与已认领投影已有；app 仍使用离线心愿逻辑。认领与订单事务联动正在实现，揭晓前不可露出赠送者。 |
-| 熟人 | 当前服务端 `GET /friends`, `POST /friend-requests`, `POST /friend-requests/{id}/accept`；目标补拒绝/解除关系 | 服务端已要求购物车收礼人是已确认好友；app 熟人管理仍是本机称呼/vCard，需要邀请/接受/拒绝 UI。联系人导入只在本机匹配，不上传整本通讯录。 |
+| 熟人 | 当前服务端 `GET /friends`, `POST /friend-requests`, `POST /friend-requests/{id}/accept`；目标补拒绝/解除关系 | 普通送礼已改为手机号/邮箱收件目标，不要求好友；app 联系人支持多联系方式、手填编辑、vCard/CSV 文件选择预览和 macOS 系统通讯录授权导入。friendships 仅继续服务心愿受众授权。非 macOS 系统通讯录桥仍待补，可用文件导入。 |
 | 礼盒 / 神秘礼 | `GET /gifts/inbox`, `/gifts/outbox`, `GET /gifts/{id}`, `PUT /gifts/{id}/puzzle`, `POST /gifts/{id}/open`, `/answer`, `/accept`, `/withdraw` 已有；目标补 `/exchange`, `/cash-out` | 服务端已用事务/行锁执行 3 次答题、揭晓、收下、撤回，私密答案只存哈希，收礼与送礼投影分离；换购/折现、退款、资金账本及 app 在线接入待做。谜题配置目前在支付后单独请求，存在默认 free 玩法的竞态，需并入结算事务。 |
 | 物流和确认收货 | `GET /shipments/{gift_id}`, `POST /shipments/{gift_id}/confirm-receipt`（仅收礼人）；`GET /gifts/{gift_id}/delivery-summary`（仅送礼人） | 三个端点通过三账号联调。仅本机管理密钥开放的 `POST /demo/shipments/{gift_id}/advance` 可按揽收→运输→派送→签收推进；app 收礼详情可看完整轨迹并确认，送礼详情只看两个布尔值。仍需窗口逐项人工验收。 |
 | 契约 | `GET /pacts`, `POST /pacts/{id}/fulfil`, `/waive`, `/nudge` | UI 已有；仅当事人操作，提醒限频，契约状态和礼物状态事务联动。 |
 | 钱包 | `GET /wallet`, `GET /wallet/ledger?cursor=`, `POST /wallet/top-up-test` | 现有钱包/流水 UI；演示充值只在开发模式可用。所有余额由服务端流水求和或受约束余额表产生，不能由 `state` 上传。 |
-| 通知 | `GET /notifications`, `POST /notifications/{id}/read` | 当前本地计算到期提醒；在线由服务端基于礼物、心愿和契约生成，不泄露发送者或隐藏商品。 |
+| 通知 | `GET /notifications`, `POST /notifications/{id}/read` | 送礼/验证领取事务自动生成站内通知，app 消费并标记已读；未注册者由可靠 outbox 投递邮件/短信邀请。心愿/契约定时提醒和设备系统推送仍待实现。 |
 | AI | 延续本机 AI bus 的 `list_gift_catalog`、`suggest_gift`、`get_gift_box_summary`，只读 | AI 不获得状态写 API 或管理员物流接口；若将来开放购买/收礼，须明确工具风险、逐次用户确认及服务端授权。 |
 
 ## 2. 数据库与协议设计
@@ -72,7 +72,7 @@
 ## 5. 客户端实施顺序与验收
 
 1. [ ] **P0** 已移除 `LiyuState::load/save` 的整包同步，资料、普通购物车和礼盒使用各自 REST 客户端；离线 demo 继续复用现有纯逻辑且不会默默混入真实账户。尚未接入的心愿/钱包/契约等页面还需统一标记“演示数据”。
-2. [ ] **P0** 账户资料页：注册/登录、显示名、手机/邮箱绑定与修改、头像 URL、地址簿已接入；仍需二进制头像上传、过期会话处理、统一全 app 账户。手机号/邮箱不要求真实，验证码 `123456`。
+2. [ ] **P0** 账户资料页：注册/登录、显示名、手机/邮箱绑定与修改、头像 URL、地址簿已接入；仍需二进制头像上传、过期会话处理、统一全 app 账户。手机号/邮箱按一次性 challenge 验证；仅显式 LIYU_TEST_DELIVERY=true 使用测试码。
 3. [ ] **P0** 商品详情、普通商品购物车/测试下单已接服务端并有本地图文断连回退；主目录搜索分页、订单历史和单件快捷送礼仍需统一到服务器订单。
 4. [ ] **P0** 在线礼盒已通过独立客户端读取入/出站角色投影，可打开、答题、收下；心愿单、换购/折现、契约、钱包仍需逐页接领域 API。服务端一个礼物只保留一个对象，在线礼盒不使用本地双份状态。
 5. [ ] **P0** app 收礼人可看完整轨迹并主动确认，送礼人只看签收/确认两个状态；后续换购私有物流待换购功能实现后验证，窗口尚未逐项点击验收。
@@ -89,3 +89,16 @@
 ## 2026-09-27 管理扩展对账
 
 参见 admin-management.md。服务端已加入优惠券设置/发放/结算核销、回收规则及 recovery-quote/exchange/cash-out、不可变钱包账本和撤回/发现过期退款、定向通知和已读。上述表中“尚待实现”的换礼/钱包/通知服务端部分以本段及当前 API 为准；消费端在线接入仍未完成。钱包当前 GET /wallet 返回余额与最近 100 笔，独立流水分页/测试充值未做；通知当前为人工定向发布，自动业务提醒和偏好同步未做。
+
+
+## 2026-09-28 按联系方式送礼交付
+
+详见 docs/contact-delivery.md，替代本表历史“必须好友才能送礼”的方向。
+- [x] 追加数据库迁移：verified contact identities/challenges/outbox，未注册收件人支持。
+- [x] 普通送礼无好友条件；购物车、订单、测试付款、送礼方列表贯通待领取状态。
+- [x] 注册/绑定后自动归属；邀请落地页及登录验证领取；幂等、验证码错误次数/重放/过期限制。
+- [x] 站内通知事务生成；联系方式邀请 HTTPS 投递桥、退避重试、后台状态与人工重试。
+- [x] 消费端多联系方式、CSV/vCard 导入预览、编辑/分页/手填收件人、验证码请求及通知消费。
+- [ ] 配置运营方真实邮件/短信供应商，完成受控真实收件箱/手机验收（当前只有本地 HTTPS 桥测试）。
+- [ ] APNs/FCM 系统推送及非 macOS 原生通讯录权限桥；当前站内通知由 App 拉取。
+- [ ] 真实支付、心愿/契约自动定时提醒仍维持既有待办。

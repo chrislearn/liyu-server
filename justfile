@@ -7,7 +7,7 @@ default:
 # Create the local development database if missing, then migrate and serve.
 dev: build-admin
     python3 scripts/dev-db.py ensure
-    cargo run --bin liyu-server
+    LIYU_TEST_DELIVERY="${LIYU_TEST_DELIVERY:-true}" cargo run --bin liyu-server
 
 # Delete all development data; migrations and demo seeds return on just dev.
 reset:

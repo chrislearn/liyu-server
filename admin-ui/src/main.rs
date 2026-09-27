@@ -23,6 +23,7 @@ const MODULES: &[(&str, &str)] = &[
     ("wishlists", "心愿单"),
     ("contracts", "礼物契约"),
     ("notifications", "运营通知"),
+    ("deliveries", "邮件 / 短信投递"),
     ("audit", "操作审计"),
 ];
 async fn api(path: &str, method: &str, body: Option<Value>, csrf: &str) -> Result<Value, String> {
@@ -390,6 +391,7 @@ fn actions(module: &str) -> Vec<(&str, &str)> {
         "wishlists" => vec![("close-wishlist", "关闭")],
         "contracts" => vec![("contract", "履约 / 豁免")],
         "notifications" => vec![("revoke-notification", "撤销通知")],
+        "deliveries" => vec![("retry-delivery", "重试投递")],
         _ => vec![],
     }
 }
@@ -479,6 +481,16 @@ fn columns(module: &str) -> Vec<&str> {
             "expires_at",
             "revoked_at",
             "read_at",
+        ],
+        "deliveries" => vec![
+            "id",
+            "gift_id",
+            "kind",
+            "status",
+            "attempts",
+            "next_attempt_at",
+            "last_error",
+            "sent_at",
         ],
         "audit" => vec![
             "id",
