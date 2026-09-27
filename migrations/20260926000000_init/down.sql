@@ -1,3 +1,5 @@
+DROP TABLE admin_sessions;
+DROP TABLE administrators;
 -- Reverses the consolidated initial schema. Drops follow the exact reverse of
 -- the original per-migration down chain (avatars → session_expiry → wish_claim
 -- → demo_logistics → gifting → wishlist → commerce → fulfillment → catalog

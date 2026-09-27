@@ -195,6 +195,14 @@ async fn add_item(req: &mut Request, res: &mut Response) {
             return error(res, StatusCode::CONFLICT, "wish item unavailable");
         }
     }
+    let available =
+        sql_query("SELECT id::bigint AS id FROM catalog WHERE id=$1 AND is_active AND stock>0")
+            .bind::<Integer, _>(input.product_id)
+            .get_result::<IdRow>(&mut conn)
+            .optional();
+    if !matches!(available, Ok(Some(_))) {
+        return error(res, StatusCode::CONFLICT, "product unavailable");
+    }
     let inserted: QueryResult<IdRow> = sql_query("INSERT INTO cart_items (user_id,product_id,recipient_id,wish_item_id) VALUES ($1,$2,$3,$4) RETURNING id")
         .bind::<BigInt, _>(uid).bind::<Integer, _>(input.product_id)
         .bind::<BigInt, _>(input.recipient_id).bind::<Nullable<BigInt>,_>(input.wish_item_id).get_result(&mut conn);
@@ -282,6 +290,9 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         let rows = cart(conn, uid)?;
         if rows.is_empty() { return Err(diesel::result::Error::NotFound); }
         for row in &rows {
+            let available = sql_query("SELECT id::bigint AS id FROM catalog WHERE id=$1 AND is_active AND stock>0")
+                .bind::<Integer,_>(row.product_id).get_result::<IdRow>(conn).optional()?;
+            if available.is_none() { return Err(diesel::result::Error::RollbackTransaction); }
             if let Some(wish_item) = row.wish_item_id {
                 if !valid_wish_claim(conn,uid,row.recipient_id,row.product_id,wish_item,false)? {
                     return Err(diesel::result::Error::RollbackTransaction);
@@ -307,6 +318,9 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         )),
         Err(diesel::result::Error::NotFound) => {
             error(res, StatusCode::BAD_REQUEST, "cart is empty")
+        }
+        Err(diesel::result::Error::RollbackTransaction) => {
+            error(res, StatusCode::CONFLICT, "product or wish unavailable")
         }
         Err(_) => error(
             res,
@@ -389,6 +403,14 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
         if order.status != "pending" { return Err(diesel::result::Error::RollbackTransaction); }
         let items: Vec<OrderItemRow> = sql_query("SELECT id,product_id,recipient_id,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
             .bind::<BigInt,_>(oid).load(conn)?;
+        // Lock/update products in stable ID order; repeated items reserve their total quantity.
+        let mut quantities = std::collections::BTreeMap::<i32, i32>::new();
+        for item in &items { *quantities.entry(item.product_id).or_default() += 1; }
+        for (product, quantity) in quantities {
+            let updated = sql_query("UPDATE catalog SET stock=stock-$2 WHERE id=$1 AND is_active AND stock>=$2")
+                .bind::<Integer,_>(product).bind::<Integer,_>(quantity).execute(conn)?;
+            if updated != 1 { return Err(diesel::result::Error::RollbackTransaction); }
+        }
         for item in items {
             if let Some(wish_item) = item.wish_item_id {
                 if !valid_wish_claim(conn,uid,item.recipient_id,item.product_id,wish_item,true)? {

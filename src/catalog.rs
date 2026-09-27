@@ -7,10 +7,10 @@ use serde_json::json;
 
 use crate::pool;
 
-#[derive(QueryableByName)]
-struct ProductRow {
+#[derive(QueryableByName, Serialize)]
+pub(crate) struct ProductRow {
     #[diesel(sql_type = Integer)]
-    id: i32,
+    pub(crate) id: i32,
     #[diesel(sql_type = Text)]
     name: String,
     #[diesel(sql_type = Text)]
@@ -77,8 +77,8 @@ impl From<ProductRow> for Product {
     }
 }
 
-const COLUMNS: &str = "id, name, category, price_cents, physical, brand, kind, spec, description, tags, stock, is_active";
-const CATEGORIES: [(&str, &str); 8] = [
+pub(crate) const COLUMNS: &str = "id, name, category, price_cents, physical, brand, kind, spec, description, tags, stock, is_active";
+pub(crate) const CATEGORIES: [(&str, &str); 8] = [
     ("coffee", "咖啡茶饮"),
     ("movie", "电影演出"),
     ("trendy", "潮流小物"),
@@ -185,7 +185,7 @@ async fn image(req: &mut Request, res: &mut Response) {
     let Some(id) = req.param::<i32>("id") else {
         return fail(res, StatusCode::BAD_REQUEST, "invalid_product_id");
     };
-    if !(0..33).contains(&id) {
+    if id < 0 {
         return fail(res, StatusCode::NOT_FOUND, "image_not_found");
     }
     let Some(variant) = req.param::<String>("variant") else {
@@ -194,9 +194,17 @@ async fn image(req: &mut Request, res: &mut Response) {
     if !matches!(variant.as_str(), "thumb" | "card" | "detail") {
         return fail(res, StatusCode::NOT_FOUND, "image_not_found");
     }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/products");
+    let dir = crate::config().data_dir.join("products");
+    let managed = dir
+        .join(format!("admin-{id}"))
+        .join(format!("{variant}.png"));
+    let managed_fallback = dir.join(format!("admin-{id}")).join("card.png");
     let detail_path = dir.join(format!("p{id:02}-detail.png"));
-    let path = if variant == "detail" && detail_path.is_file() {
+    let path = if managed.is_file() {
+        managed
+    } else if managed_fallback.is_file() {
+        managed_fallback
+    } else if variant == "detail" && detail_path.is_file() {
         detail_path
     } else {
         dir.join(format!("p{id:02}.png"))
@@ -205,8 +213,10 @@ async fn image(req: &mut Request, res: &mut Response) {
         Ok(data) => {
             res.headers_mut()
                 .insert("content-type", "image/png".parse().unwrap());
-            res.headers_mut()
-                .insert("cache-control", "public, max-age=86400".parse().unwrap());
+            res.headers_mut().insert(
+                "cache-control",
+                "public, max-age=0, must-revalidate".parse().unwrap(),
+            );
             let _ = res.write_body(data);
         }
         Err(_) => fail(res, StatusCode::NOT_FOUND, "image_not_found"),
@@ -227,7 +237,7 @@ mod tests {
     fn every_seeded_product_has_baseline_image() {
         for id in 0..33 {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/products")
+                .join("test-data/products")
                 .join(format!("p{id:02}.png"));
             assert!(p.exists(), "missing {}", p.display());
         }
@@ -239,7 +249,7 @@ mod tests {
         assert_eq!(examples.len(), 8);
         for id in examples {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/products")
+                .join("test-data/products")
                 .join(format!("p{id:02}-detail.png"));
             assert!(p.exists(), "missing {}", p.display());
         }

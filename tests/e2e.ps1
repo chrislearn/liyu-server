@@ -89,11 +89,11 @@ $acceptedShipment = Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Heade
 if ($acceptedShipment.recipient.phone -ne '13900000000') { throw 'Recipient shipment missing address snapshot' }
 
 # --- Avatar upload API: negative and positive end-to-end checks ---
-# Upload sample: the repository's real 400x400 PNG (assets/products/p23.png,
+# Upload sample: the repository's real 400x400 PNG (test-data/products/p23.png,
 # ~15 KB). Hand-rolled in-memory PNGs proved brittle across PowerShell builds
 # (uint32 casts, zlib framing), so the positive path uses bytes the real
 # decoder is guaranteed to accept.
-$png24 = [System.IO.File]::ReadAllBytes("$PSScriptRoot/../assets/products/p23.png")
+$png24 = [System.IO.File]::ReadAllBytes("$PSScriptRoot/../test-data/products/p23.png")
 # 1. Unauthenticated upload is rejected.
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Post -ContentType 'image/png' -Body $png24 } 401
 # 2. Declared content type outside the allow-list is rejected.
@@ -136,10 +136,10 @@ if ($media.Content.Length -ne $png24.Length) { throw 'Avatar media bytes differ 
 # 9. Profile reflects the uploaded avatar URL.
 $senderAfter = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $sender
 if ($senderAfter.avatar_url -ne $upload.avatar_url) { throw 'Profile avatar_url was not updated' }
-# 10. Deleting the avatar clears the profile pointer; media then 404s.
+# 10. Deleting the avatar restores the default profile image; uploaded media 404s.
 Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Delete -Headers $sender | Out-Null
 $senderCleared = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $sender
-if ($null -ne $senderCleared.avatar_url) { throw 'Avatar delete did not clear profile avatar_url' }
+if ($senderCleared.avatar_url -ne "/api/v1/media/default-avatars/$($senderCleared.id)") { throw 'Avatar delete did not restore the default avatar' }
 ExpectStatus { Invoke-WebRequest "$BaseUrl$($upload.avatar_url)" } 404
 # 11. Media endpoint hardens the id: mixed-case/braced UUID spellings 404.
 $rawId = $upload.avatar_url -replace '^/api/v1/media/avatars/', ''

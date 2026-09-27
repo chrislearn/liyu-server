@@ -73,3 +73,26 @@ diesel::allow_tables_to_appear_in_same_query!(
     shipping_addresses,
     avatars
 );
+
+diesel::table! {
+    administrators (id) {
+        id -> Int8,
+        username -> Text,
+        password_hash -> Text,
+        is_active -> Bool,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    admin_sessions (token_hash) {
+        token_hash -> Text,
+        administrator_id -> Int8,
+        csrf_token -> Text,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::joinable!(admin_sessions -> administrators (administrator_id));
+diesel::allow_tables_to_appear_in_same_query!(administrators, admin_sessions);

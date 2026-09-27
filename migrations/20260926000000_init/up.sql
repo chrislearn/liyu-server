@@ -449,3 +449,25 @@ CREATE TABLE avatars (
     CONSTRAINT avatar_byte_len_check CHECK (byte_len > 0 AND byte_len <= 1048576)
 );
 CREATE INDEX avatars_owner_id_idx ON avatars(owner_id);
+
+-- 12. web administration (intentionally independent of users/sessions) -------
+CREATE TABLE administrators (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    administrator_id BIGINT NOT NULL REFERENCES administrators(id) ON DELETE CASCADE,
+    csrf_token TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '8 hours')
+);
+CREATE INDEX admin_sessions_expiry_idx ON admin_sessions(expires_at);
+CREATE INDEX admin_sessions_administrator_idx ON admin_sessions(administrator_id);
+-- Existing stable fixture IDs remain unchanged; new products receive IDs > 32.
+CREATE SEQUENCE catalog_id_seq OWNED BY catalog.id;
+SELECT setval('catalog_id_seq', GREATEST((SELECT MAX(id) FROM catalog), 32), true);
+ALTER TABLE catalog ALTER COLUMN id SET DEFAULT nextval('catalog_id_seq');

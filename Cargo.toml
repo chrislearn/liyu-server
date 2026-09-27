@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+argon2 = "0.5.3"
+dotenvy = "0.15"
 diesel = { version = "2.3", features = ["postgres", "r2d2", "serde_json", "uuid"] }
 diesel_migrations = "2.3"
 salvo = { version = "0.84", features = ["http1", "server"] }

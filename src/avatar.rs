@@ -15,10 +15,58 @@ const MAX_BYTES: usize = 1_048_576;
 const MIN_DIMENSION: u32 = 16;
 const MAX_DIMENSION: u32 = 4096;
 
+pub(crate) fn default_url(owner: i64) -> String {
+    format!("/api/v1/media/default-avatars/{owner}")
+}
+
+/// Versioned hash keeps each user's symmetric identicon stable across restarts.
+fn default_png(owner: i64) -> Result<Vec<u8>, image::ImageError> {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(format!("liyu-avatar-v1:{owner}"));
+    let foreground = image::Rgb([48 + hash[0] % 144, 48 + hash[1] % 144, 48 + hash[2] % 144]);
+    let mut image = image::RgbImage::from_pixel(140, 140, image::Rgb([240, 243, 250]));
+    for row in 0..5u32 {
+        for col in 0..3u32 {
+            if hash[3 + (row * 3 + col) as usize] & 1 == 0 {
+                continue;
+            }
+            for mirrored in [col, 4 - col] {
+                for y in (row + 1) * 20..(row + 2) * 20 {
+                    for x in (mirrored + 1) * 20..(mirrored + 2) * 20 {
+                        image.put_pixel(x, y, foreground);
+                    }
+                }
+            }
+        }
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png)?;
+    Ok(bytes.into_inner())
+}
+
+#[handler]
+async fn default_media(req: &mut Request, res: &mut Response) {
+    let Some(owner) = req.param::<i64>("id").filter(|id| *id > 0) else {
+        return fail(res, StatusCode::BAD_REQUEST, "invalid user id");
+    };
+    match default_png(owner) {
+        Ok(bytes) => {
+            res.headers_mut()
+                .insert("content-type", "image/png".parse().unwrap());
+            res.headers_mut()
+                .insert("cache-control", "public, max-age=86400".parse().unwrap());
+            let _ = res.write_body(bytes);
+        }
+        Err(_) => fail(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "avatar generation failed",
+        ),
+    }
+}
+
 fn avatar_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("avatars")
+    crate::config().data_dir.join("avatars")
 }
 
 fn fail(res: &mut Response, status: StatusCode, message: &str) {
@@ -184,7 +232,7 @@ fn media_path(id: uuid::Uuid) -> PathBuf {
 /// Atomically replace `path` with `bytes`: write a sibling temp file, fsync,
 /// then rename so concurrent readers and crash recovery never observe a
 /// truncated file. The temp file is cleaned up on every failure path.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
     let write_result = (|| -> std::io::Result<()> {
@@ -454,10 +502,25 @@ pub fn routes() -> Router {
     Router::new()
         .push(Router::with_path("me/avatar").post(upload).delete(delete))
         .push(Router::with_path("media/avatars/{id}").get(media))
+        .push(Router::with_path("media/default-avatars/{id}").get(default_media))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_avatar_is_stable_decodable_and_user_specific() {
+        let first = super::default_png(1).unwrap();
+        assert_eq!(first, super::default_png(1).unwrap());
+        assert_ne!(first, super::default_png(2).unwrap());
+        let image = image::load_from_memory(&first).unwrap().to_rgb8();
+        assert_eq!(image.dimensions(), (140, 140));
+        for y in 0..140 {
+            for x in 0..140 {
+                assert_eq!(image.get_pixel(x, y), image.get_pixel(139 - x, y));
+            }
+        }
+        assert_eq!(super::default_url(1), "/api/v1/media/default-avatars/1");
+    }
     use super::*;
 
     fn png(width: u32, height: u32) -> Vec<u8> {

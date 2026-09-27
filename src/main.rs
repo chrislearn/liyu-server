@@ -1,6 +1,8 @@
+mod admin;
 mod avatar;
 mod catalog;
 mod commerce;
+mod config;
 mod demo_logistics;
 mod fulfillment;
 mod gifting;
@@ -19,6 +21,12 @@ use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
 pub(crate) type DbPool = Pool<ConnectionManager<PgConnection>>;
+static CONFIG: OnceLock<config::Config> = OnceLock::new();
+
+pub(crate) fn config() -> &'static config::Config {
+    CONFIG.get().expect("configuration initialized")
+}
+
 static DB: OnceLock<DbPool> = OnceLock::new();
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const TEST_CODE: &str = "123456";
@@ -298,21 +306,35 @@ async fn legacy_state_disabled(res: &mut Response) {
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL");
+    if let Err(err) = dotenvy::dotenv() {
+        if !err.not_found() {
+            panic!("load .env: {err}");
+        }
+    }
+    let settings = config::Config::load().expect("invalid server configuration");
+    settings.prepare_storage().expect("prepare data storage");
+    CONFIG
+        .set(settings)
+        .unwrap_or_else(|_| panic!("configuration already initialized"));
+    let url = std::env::var("DATABASE_URL")
+        .expect("set DATABASE_URL in .env (copy .env.example) or the environment");
     let manager = ConnectionManager::<PgConnection>::new(url);
     let db = Pool::builder()
-        .max_size(8)
+        .max_size(config().pool_max_size)
         .build(manager)
         .expect("connect to PostgreSQL");
     {
         let mut conn = db.get().expect("get database connection");
         conn.run_pending_migrations(MIGRATIONS)
             .expect("run migrations");
+        admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
+        admin::bootstrap(&mut conn).expect("initialize administrator");
     }
     DB.set(db)
         .unwrap_or_else(|_| panic!("database already initialized"));
     let router = Router::new()
         .push(Router::with_path("health").get(health))
+        .push(admin::routes())
         .push(Router::with_path("api/v1/auth/register").post(register))
         .push(Router::with_path("api/v1/auth/login").post(login))
         .push(Router::with_path("api/v1/auth/logout").post(logout))

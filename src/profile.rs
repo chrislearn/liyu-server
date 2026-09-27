@@ -92,6 +92,9 @@ fn profile_json(conn: &mut PgConnection, owner: i64) -> QueryResult<serde_json::
         .first(conn)
         .optional()?;
     let (phone, email, avatar_url) = details.unwrap_or_default();
+    let avatar_url = avatar_url
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| crate::avatar::default_url(id));
     Ok(
         json!({"id":id,"identifier":identifier,"display_name":display_name,"phone":phone,"email":email,"avatar_url":avatar_url}),
     )
