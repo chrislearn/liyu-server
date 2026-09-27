@@ -44,7 +44,7 @@ Avatars live in `<data-root>/avatars/`; product media in `<data-root>/products/`
 
 Open `/admin` in a browser. This is a web-only administration interface served by the Rust server, with Diesel/PostgreSQL persistence. It supports product search, creation and editing, prices, stock, category, tags, physical/digital type, publishing/unpublishing, and uploading thumbnail/card/detail images (JPEG/PNG/WebP, up to 4 MiB, 16–4096 pixels). Products are unpublished instead of deleted so existing orders and gifts retain their references. Unpublished/out-of-stock products cannot be added to the cart or ordered; payment rechecks availability and atomically deducts stock, including multiple lines of the same product. Historical orders retain their recorded price.
 
-Create the first administrator by setting these values in `.env` before starting:
+Configure an administrator by setting these values in `.env` before starting:
 
 ```dotenv
 LIYU_ADMIN_USERNAME=admin
@@ -52,13 +52,13 @@ LIYU_ADMIN_PASSWORD=<your-password>
 LIYU_ADMIN_COOKIE_SECURE=false
 ```
 
-No administrator or default admin password is seeded. Admin usernames and passwords have no application length requirements. When both bootstrap values are empty, no administrator is created. Bootstrap runs only when `administrators` is empty; changing these variables does not overwrite an existing password. Clear the bootstrap password from `.env` after the first successful startup. HTTPS deployments should set `LIYU_ADMIN_COOKIE_SECURE=true`.
+No administrator or default admin password is seeded. Admin usernames and passwords have no application length requirements. When both values are empty, configured-admin synchronization is skipped. On each startup, the named administrator is created if absent, or its password is synchronized with the configuration if changed. Other administrators are preserved. Password changes revoke that administrator’s existing sessions; unchanged passwords preserve sessions. Restart after editing `.env`; exported environment variables still take precedence. Clear both values to stop managing the account through configuration. HTTPS deployments should set `LIYU_ADMIN_COOKIE_SECURE=true`.
 
 `administrators` and `admin_sessions` are independent of `users` and `sessions`. Admin passwords use salted Argon2id hashes. Admin sessions expire after 8 hours and use an HttpOnly, SameSite=Strict cookie scoped to `/admin`. User Bearer tokens cannot authorize management operations, and admin sessions cannot authorize user APIs. Mutations require `X-Admin-Request: 1` plus the CSRF token returned by login/`me`; supplied Origin headers must match the server host. The web page handles these headers automatically.
 
 Admin endpoints are `/admin/api/login`, `/logout`, `/me`, `/products` (GET/POST), `/products/{id}` (PUT), and `/products/{id}/images/{variant}` (POST raw image bytes), all under `/admin/api`. Products use integer `price_cents` in the API; the page displays yuan. Product list responses include `items` and `next_cursor` (100 per page).
 
-**Existing databases:** startup automatically installs the admin tables and product ID sequence when all three are absent, even if the consolidated migration is already marked `20260926000000`. It applies only section 12 from the existing init SQL in one locked transaction, preserving users, products, orders and the migration ledger. Repeated startups preserve administrator accounts and the product sequence. Partially installed admin schemas are reported for inspection. `just upgrade-admin` remains available for an explicit offline upgrade. Fresh databases receive everything through the normal migration.
+**Existing databases:** startup automatically installs the admin tables and product ID sequence when all three are absent, even if the consolidated migration is already marked `20260926000000`. It applies only section 12 from the existing init SQL in one locked transaction, preserving users, products, orders and the migration ledger. Repeated startups preserve other administrator accounts and the product sequence; the configured account follows `.env` as described above. Partially installed admin schemas are reported for inspection. `just upgrade-admin` remains available for an explicit offline upgrade. Fresh databases receive everything through the normal migration.
 
 ## Upgrading a previously migrated database
 

@@ -95,15 +95,47 @@ pub(crate) fn bootstrap(conn: &mut PgConnection) -> Result<(), String> {
     if name.is_empty() && password.is_empty() {
         return Ok(());
     }
-    let hash = password_hash(&password)?;
+    sync_configured_admin(conn, &name, &password)
+}
+
+fn sync_configured_admin(
+    conn: &mut PgConnection,
+    name: &str,
+    password: &str,
+) -> Result<(), String> {
     conn.transaction::<(), diesel::result::Error, _>(|conn| {
         sql_query("SELECT pg_advisory_xact_lock(731129927)").execute(conn)?;
-        let count: Count =
-            sql_query("SELECT COUNT(*) AS count FROM administrators").get_result(conn)?;
-        if count.count == 0 {
+        let existing =
+            sql_query("SELECT id,username,password_hash FROM administrators WHERE username=$1")
+                .bind::<Text, _>(name)
+                .get_result::<Admin>(conn)
+                .optional()?;
+        if let Some(admin) = existing {
+            let unchanged = PasswordHash::new(&admin.password_hash)
+                .ok()
+                .is_some_and(|hash| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &hash)
+                        .is_ok()
+                });
+            if !unchanged {
+                let hash = password_hash(password)
+                    .map_err(|_| diesel::result::Error::RollbackTransaction)?;
+                sql_query("UPDATE administrators SET password_hash=$1 WHERE id=$2")
+                    .bind::<Text, _>(hash)
+                    .bind::<BigInt, _>(admin.id)
+                    .execute(conn)?;
+                // Password changes invalidate this administrator's previous sessions.
+                sql_query("DELETE FROM admin_sessions WHERE administrator_id=$1")
+                    .bind::<BigInt, _>(admin.id)
+                    .execute(conn)?;
+            }
+        } else {
+            let hash =
+                password_hash(password).map_err(|_| diesel::result::Error::RollbackTransaction)?;
             sql_query("INSERT INTO administrators(username,password_hash) VALUES ($1,$2)")
-                .bind::<Text, _>(&name)
-                .bind::<Text, _>(&hash)
+                .bind::<Text, _>(name)
+                .bind::<Text, _>(hash)
                 .execute(conn)?;
         }
         Ok(())
@@ -619,6 +651,44 @@ mod tests {
             assert_eq!(original.id, 101);
             let admin: Admin = sql_query("SELECT id,username,password_hash FROM administrators WHERE username='existing'").get_result(conn)?;
             assert_eq!(admin.password_hash, "preserved hash");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configured_admin_sync_updates_only_changed_password_and_revokes_its_sessions() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let mut conn = PgConnection::establish(&url).unwrap();
+        conn.test_transaction::<_, diesel::result::Error, _>(|conn| {
+            let schema = format!("admin_sync_{}", uuid::Uuid::new_v4().simple());
+            conn.batch_execute(&format!(
+                "CREATE SCHEMA {schema}; SET LOCAL search_path TO {schema}; \
+                 CREATE TABLE catalog (id integer PRIMARY KEY); INSERT INTO catalog VALUES (32);"
+            ))?;
+            ensure_schema(conn).unwrap();
+            sync_configured_admin(conn, "other", "keep").unwrap();
+            sync_configured_admin(conn, "admin", "old").unwrap();
+            let read = |conn: &mut PgConnection, name: &str| {
+                sql_query("SELECT id,username,password_hash FROM administrators WHERE username=$1")
+                    .bind::<Text,_>(name).get_result::<Admin>(conn)
+            };
+            let other_hash = read(conn, "other")?.password_hash;
+            let before = read(conn, "admin")?;
+            sql_query("INSERT INTO admin_sessions(token_hash,administrator_id,csrf_token) VALUES ('admin-test',$1,'csrf')")
+                .bind::<BigInt,_>(before.id).execute(conn)?;
+            sync_configured_admin(conn, "admin", "old").unwrap();
+            assert_eq!(read(conn,"admin")?.password_hash, before.password_hash);
+            let retained: Count = sql_query("SELECT COUNT(*) AS count FROM admin_sessions").get_result(conn)?;
+            assert_eq!(retained.count, 1);
+            sync_configured_admin(conn, "admin", "admin").unwrap();
+            let after = read(conn, "admin")?;
+            assert_eq!(after.id, before.id);
+            assert!(Argon2::default().verify_password(b"admin", &PasswordHash::new(&after.password_hash).unwrap()).is_ok());
+            let revoked: Count = sql_query("SELECT COUNT(*) AS count FROM admin_sessions").get_result(conn)?;
+            assert_eq!(revoked.count, 0);
+            assert_eq!(read(conn,"other")?.password_hash, other_hash);
             Ok(())
         });
     }
