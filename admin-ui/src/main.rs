@@ -672,6 +672,150 @@ fn Report(
         }
     }
 }
+// Menus use viewport coordinates so the modal's scroll container cannot clip them.
+fn menu_position(id: &str, count: usize) -> Option<(f64, f64, f64, f64)> {
+    let window = web_sys::window()?;
+    let rect = window
+        .document()?
+        .get_element_by_id(id)?
+        .get_bounding_client_rect();
+    let height = window.inner_height().ok()?.as_f64()?;
+    let width = window.inner_width().ok()?.as_f64()?;
+    let desired = (count as f64 * 40.0 + 10.0).min(250.0);
+    let below = (height - rect.bottom() - 14.0).max(0.0);
+    let above = (rect.top() - 14.0).max(0.0);
+    let upwards = below < desired && above > below;
+    let available = if upwards { above } else { below };
+    let menu_height = desired.min(available);
+    let top = if upwards {
+        rect.top() - menu_height - 6.0
+    } else {
+        rect.bottom() + 6.0
+    };
+    let menu_width = rect.width().min(width - 16.0);
+    Some((
+        rect.left().clamp(8.0, (width - menu_width - 8.0).max(8.0)),
+        top,
+        menu_width,
+        menu_height,
+    ))
+}
+
+#[component]
+fn FormSelect(
+    field: Field,
+    value: String,
+    mut editing: Signal<Option<Editor>>,
+    mut open_select: Signal<Option<String>>,
+) -> Element {
+    let key = field.key;
+    let id = format!("select-{key}");
+    let list_id = format!("options-{key}");
+    let selected = field.options.iter().position(|(v, _)| *v == value);
+    let mut highlighted = use_signal(|| selected.unwrap_or(0));
+    let mut position = use_signal(|| (0.0, 0.0, 0.0, 0.0));
+    let is_open = open_select().as_deref() == Some(key);
+    let options = field.options.clone();
+    let keyboard_options = options.clone();
+    let button_id = id.clone();
+    let keyboard_id = id.clone();
+    use_effect(move || {
+        use wasm_bindgen::JsCast;
+        let index = highlighted();
+        if open_select().as_deref() != Some(key) {
+            return;
+        }
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let (Some(menu), Some(option)) = (
+                document.get_element_by_id(&format!("options-{key}")),
+                document.get_element_by_id(&format!("option-{key}-{index}")),
+            ) {
+                let bounds = menu.get_bounding_client_rect();
+                let item = option.get_bounding_client_rect();
+                if let Some(menu) = menu.dyn_ref::<web_sys::HtmlElement>() {
+                    let delta = if item.bottom() > bounds.bottom() - 5.0 {
+                        item.bottom() - bounds.bottom() + 5.0
+                    } else if item.top() < bounds.top() + 5.0 {
+                        item.top() - bounds.top() - 5.0
+                    } else {
+                        0.0
+                    };
+                    menu.set_scroll_top(menu.scroll_top() + delta.round() as i32);
+                }
+            }
+        }
+    });
+    let (left, top, width, height) = position();
+    rsx! {
+        div { class: "form-select",
+            button {
+                id, r#type: "button", class: "select-trigger", role: "combobox",
+                "aria-label": label(key), "aria-haspopup": "listbox",
+                "aria-expanded": is_open, "aria-controls": list_id.clone(),
+                "aria-activedescendant": if is_open { format!("option-{key}-{}", highlighted()) } else { String::new() },
+                onblur: move |_| { if open_select().as_deref() == Some(key) { open_select.set(None); } },
+                onclick: move |_| {
+                    if is_open { open_select.set(None); }
+                    else if let Some(p) = menu_position(&button_id, options.len()) {
+                        position.set(p); highlighted.set(selected.unwrap_or(0)); open_select.set(Some(key.into()));
+                    }
+                },
+                onkeydown: move |event| {
+                    let count = keyboard_options.len();
+                    let next = match event.key() {
+                        Key::ArrowDown => Some(if is_open { (highlighted() + 1).min(count - 1) } else { selected.unwrap_or(0) }),
+                        Key::ArrowUp => Some(if is_open { highlighted().saturating_sub(1) } else { selected.unwrap_or(0) }),
+                        Key::Home => Some(0),
+                        Key::End => Some(count - 1),
+                        k if k == Key::Enter || k == Key::Character(" ".into()) => {
+                            event.prevent_default();
+                            if is_open {
+                                if let Some(v) = editing.write().as_mut() { v.values[key] = json!(keyboard_options[highlighted()].0); }
+                                open_select.set(None);
+                            } else if let Some(p) = menu_position(&keyboard_id, count) {
+                                position.set(p); highlighted.set(selected.unwrap_or(0)); open_select.set(Some(key.into()));
+                            }
+                            None
+                        }
+                        Key::Escape | Key::Tab => { open_select.set(None); None }
+                        _ => None,
+                    };
+                    if let Some(next) = next {
+                        event.prevent_default();
+                        if let Some(p) = menu_position(&keyboard_id, count) {
+                            position.set(p); highlighted.set(next); open_select.set(Some(key.into()));
+                        }
+                    }
+                },
+                span { {selected.map(|i| field.options[i].1).unwrap_or("请选择")} }
+                span { class: "select-chevron", "aria-hidden": "true", "⌄" }
+            }
+            if is_open {
+                div { class: "select-dismiss", onpointerdown: move |e| { e.prevent_default(); open_select.set(None); } }
+                div {
+                    id: list_id.clone(), class: "select-menu", role: "listbox", "aria-label": label(key),
+                    left: "{left}px", top: "{top}px", width: "{width}px", max_height: "{height}px",
+                    onpointerdown: move |e| e.prevent_default(),
+                    for (index, (value, name)) in field.options.iter().enumerate() {
+                        button {
+                            key: "{value}", id: "option-{key}-{index}", r#type: "button", role: "option", tabindex: "-1",
+                            class: if highlighted() == index { "select-option highlighted" } else { "select-option" },
+                            "aria-selected": selected == Some(index),
+                            onmouseenter: move |_| highlighted.set(index),
+                            onclick: { let value = value.to_string(); move |_| {
+                                if let Some(v) = editing.write().as_mut() { v.values[key] = json!(value); }
+                                open_select.set(None);
+                            } },
+                            span { "{name}" }
+                            if selected == Some(index) { span { "aria-hidden": "true", "✓" } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn EditDialog(
     mut editing: Signal<Option<Editor>>,
@@ -681,6 +825,27 @@ fn EditDialog(
     mut revision: Signal<u64>,
     title: String,
 ) -> Element {
+    let mut open_select = use_signal(|| None::<String>);
+    // A resize invalidates viewport coordinates; scrolling the modal closes the menu too.
+    let resize_listener = use_hook(move || {
+        use wasm_bindgen::JsCast;
+        let handler =
+            wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || open_select.set(None));
+        if let Some(window) = web_sys::window() {
+            let _ =
+                window.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+        }
+        std::rc::Rc::new(handler)
+    });
+    use_drop(move || {
+        use wasm_bindgen::JsCast;
+        if let Some(window) = web_sys::window() {
+            let _ = window.remove_event_listener_with_callback(
+                "resize",
+                resize_listener.as_ref().as_ref().unchecked_ref(),
+            );
+        }
+    });
     let ed = editing().unwrap();
     let heading = if ed.action == "product" {
         if ed.create {
@@ -692,7 +857,7 @@ fn EditDialog(
         format!("{title} · 设置")
     };
     rsx! {
-        div { class:"backdrop", section { class:"modal", role:"dialog", "aria-modal":"true",
+        div { class:"backdrop", section { class:"modal", role:"dialog", "aria-modal":"true", onscroll: move |_| open_select.set(None),
             h2 { "{heading}" } p { class:"muted","记录 #{ed.id} · 金额单位为分，日期按 UTC 填写" }
             form { onsubmit:move |ev|{ev.prevent_default(); async move {
                 busy.set(true);notice.set(String::new());let ed=editing().unwrap();let body=prepare(&ed);
@@ -705,9 +870,7 @@ fn EditDialog(
                 div { class:"fields", for f in fields(&ed.action) {
                     label { key:"{f.key}","{label(f.key)}",
                         if f.kind=="select" {
-                            select { value:form_value(&ed.values,f.key,f.kind),onchange:{let key=f.key;move|e|{if let Some(v)=editing.write().as_mut(){v.values[key]=json!(e.value());}}},
-                                for(value,name)in f.options {option{value,"{name}"}}
-                            }
+                            FormSelect { value: form_value(&ed.values,f.key,f.kind), field: f.clone(), editing, open_select }
                         } else if f.kind=="textarea" {
                             textarea { value:form_value(&ed.values,f.key,f.kind),oninput:{let key=f.key;move|e|{if let Some(v)=editing.write().as_mut(){v.values[key]=json!(e.value());}}} }
                         } else {

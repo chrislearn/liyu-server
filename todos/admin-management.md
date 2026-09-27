@@ -64,3 +64,13 @@
 - [ ] 独立钱包流水分页、普通结算钱包抵扣、测试充值（本轮换礼已支持钱包补差）。
 - [ ] 后台定时到期退款与自动业务通知、通知偏好同步。
 - [ ] 真实支付、提现及供应商接入；管理员角色权限细分。
+
+## 下拉控件修正（2026-09-28）
+
+- [x] A12 将所有管理表单原生 select 替换为统一 Dioxus 下拉；对齐触发框、统一白底绿系选中样式，处理弹窗滚动/视口边界，支持键盘及点击外部关闭；构建及浏览器验证后核对完成。
+
+A12 验收：所有管理表单统一使用 FormSelect；菜单与触发框等宽、间隔 6px，白底及绿系选中样式，fixed 定位避开弹窗裁切，按视口空间向上/下展开。支持方向键/Home/End/Enter/Space、Escape/Tab、鼠标选择及外部关闭，长选项键盘定位自动滚动；未匹配值显示“请选择”。表单滚动及窗口 resize 关闭菜单。CSS 随前端构建安装为内容哈希资源，避免正在运行的 Rust 服务提供编译时旧样式。
+
+- Dioxus fmt、wasm32 clippy `-D warnings`、release WASM 构建、服务端构建及 `git diff --check` 通过。CSS 资源 HTTP 200、Content-Type text/css，内容与源文件一致。
+- 实际浏览器：用户设置菜单 x=270、宽360，与触发框一致，top=420.53，距触发框 bottom=414.53 为6px；鼠标选择/外部关闭，Home/End/Enter/Escape/Tab 通过。优惠券种类和优惠方式切换正确；分类9项 End 后 scrollTop=120、末项可见，仅一个菜单。窄屏390×720单列，菜单和触发框 x=50、宽290、位于视口内；resize 关闭菜单。优惠券表单 PageDown 后 modal scrollTop=223、菜单数0。商品分类选择末项正确。浏览器无 error/warn。
+- 独立测试库 liyu_management_e2e_final 用户1通过新组件选择“是”、填写原因并提交，显示“已保存”，保持既有启用状态。未修改 operator 业务库；临时验证服务与标签页已关闭。截图：`/Users/chris/.octos/outer/verify/liyu-dropdown-fixed.png`。
