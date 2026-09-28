@@ -417,6 +417,7 @@ async fn main() {
         }
         conn.run_pending_migrations(MIGRATIONS)
             .expect("run migrations");
+        contact_delivery::ensure_schema(&mut conn).expect("upgrade contact book schema");
         admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
         management::ensure_schema(&mut conn).expect("upgrade management schema");
         admin::bootstrap(&mut conn).expect("initialize administrator");

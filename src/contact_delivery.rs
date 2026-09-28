@@ -1,9 +1,10 @@
 //! Verified contact ownership, pending gifts and durable provider delivery.
 use crate::{error, hash_secret, new_session_token, pool, user_id};
 use diesel::{
+    connection::SimpleConnection,
     prelude::*,
     sql_query,
-    sql_types::{BigInt, Jsonb, Nullable, Text},
+    sql_types::{BigInt, Bool, Jsonb, Nullable, Text},
 };
 use salvo::prelude::*;
 use serde::Deserialize;
@@ -86,6 +87,44 @@ pub(crate) fn validate_config() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The contact migration may already be recorded as applied on an existing database.
+/// Reuse its marked SQL section to add only the new address-book structures.
+pub(crate) fn ensure_schema(conn: &mut PgConnection) -> Result<(), String> {
+    #[derive(QueryableByName)]
+    struct Ready {
+        #[diesel(sql_type=Bool)]
+        ready: bool,
+    }
+    const READY_SQL: &str = "SELECT (to_regclass('contact_identities') IS NOT NULL
+        AND to_regclass('sender_contacts') IS NOT NULL
+        AND to_regclass('sender_contact_methods') IS NOT NULL
+        AND to_regclass('contact_identities_user_kind_idx') IS NOT NULL
+        AND to_regclass('sender_contact_methods_active_unique') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='order_items' AND column_name='recipient_bound_user_id')
+        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='order_items' AND column_name='recipient_change_confirmed')
+        AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='contact_identities'::regclass AND conname='contact_identities_user_id_kind_key')) AS ready";
+    conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        sql_query("SELECT pg_advisory_xact_lock(731129928)").execute(conn)?;
+        let ready = sql_query(READY_SQL).get_result::<Ready>(conn)?;
+        if ready.ready {
+            return Ok(());
+        }
+        let section = include_str!("../migrations/20260928000000_contact_delivery/up.sql")
+            .split_once("-- contact book extension (shared with startup upgrade)")
+            .expect("contact book SQL section")
+            .1
+            .split("-- end contact book extension")
+            .next()
+            .unwrap();
+        conn.batch_execute(section)?;
+        if !sql_query(READY_SQL).get_result::<Ready>(conn)?.ready {
+            return Err(diesel::result::Error::RollbackTransaction);
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("contact book schema upgrade failed: {e}"))
 }
 
 pub(crate) fn test_mode() -> bool {
