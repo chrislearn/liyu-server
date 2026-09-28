@@ -18,6 +18,17 @@ pub(crate) struct Recipient {
     pub label: String,
 }
 
+#[derive(Deserialize)]
+struct AvatarLookupInput {
+    contacts: Vec<Recipient>,
+}
+
+#[derive(QueryableByName)]
+struct AvatarUrlRow {
+    #[diesel(sql_type=Text)]
+    avatar_url: String,
+}
+
 pub(crate) fn normalize(kind: &str, value: &str) -> Option<String> {
     let value = value.trim();
     match kind {
@@ -403,6 +414,56 @@ async fn list_contacts(req: &mut Request, res: &mut Response) {
     }
 }
 
+/// Return only avatars actively chosen by verified contact owners. Missing
+/// contacts and accounts using the generated avatar have the same response.
+#[handler]
+async fn contact_avatars(req: &mut Request, res: &mut Response) {
+    if user_id(req).is_none() {
+        return error(res, StatusCode::UNAUTHORIZED, "login required");
+    }
+    let Ok(input) = req.parse_json::<AvatarLookupInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid contacts");
+    };
+    if input.contacts.is_empty() || input.contacts.len() > 32 {
+        return error(res, StatusCode::BAD_REQUEST, "send 1 to 32 contacts");
+    }
+    let mut contacts = Vec::new();
+    for contact in input.contacts {
+        let Some(value) = normalize(&contact.kind, &contact.value) else {
+            return error(res, StatusCode::BAD_REQUEST, "invalid contact value");
+        };
+        if !contacts.contains(&(contact.kind.clone(), value.clone())) {
+            contacts.push((contact.kind, value));
+        }
+    }
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let mut avatars = Vec::new();
+    for (kind, value) in contacts {
+        // Joining the avatar record excludes stale, external or default URLs.
+        let result = sql_query("SELECT p.avatar_url AS avatar_url FROM contact_identities c JOIN users u ON u.id=c.user_id AND u.is_active JOIN user_profiles p ON p.user_id=u.id JOIN avatars a ON a.owner_id=u.id AND p.avatar_url='/api/v1/media/avatars/'||replace(a.id::text,'-','') WHERE c.kind=$1 AND c.value=$2 LIMIT 1")
+            .bind::<Text, _>(&kind)
+            .bind::<Text, _>(&value)
+            .get_result::<AvatarUrlRow>(&mut conn)
+            .optional();
+        match result {
+            Ok(Some(row)) => {
+                avatars.push(json!({"kind":kind,"value":value,"avatar_url":row.avatar_url}))
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return error(
+                    res,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "avatars unavailable",
+                )
+            }
+        }
+    }
+    res.render(Json(json!({"avatars":avatars})));
+}
+
 #[handler]
 async fn create_contact(req: &mut Request, res: &mut Response) {
     let Some(owner) = user_id(req) else {
@@ -627,6 +688,7 @@ pub(crate) fn routes() -> Router {
                 .get(list_contacts)
                 .post(create_contact),
         )
+        .push(Router::with_path("api/v1/contacts/avatars").post(contact_avatars))
         .push(Router::with_path("api/v1/me/contact-identities").delete(release_identity))
         .push(Router::with_path("api/v1/auth/challenges").post(challenge))
         .push(Router::with_path("gift-invitations/{token}").get(invitation))

@@ -15,6 +15,7 @@
 - `PUT /api/v1/me/email` 或 `/me/phone`：带 Bearer token，`{"value":"…","challenge_id":"…","code":"…"}`。
 - `DELETE /api/v1/me/contact-identities`：带 Bearer token，`{"kind":"email","value":"…"}`，释放本人已验证的联系方式；更换手机号/邮箱后旧值必须显式释放，才可由另一用户验证。已领取礼物不会转移。
 - `POST /api/v1/contacts`：保存送礼人的联系人，格式 `{"label":"朋友","phones":["13800138000"],"emails":["a@example.com","b@example.com"]}`；`GET /api/v1/contacts` 列出本人有效联系人的名称和联系方式。内部绑定的用户 ID 不向客户端返回。一个联系人内已匹配的联系方式必须属于同一个用户。
+- `POST /api/v1/contacts/avatars`：带 Bearer token，提交 `{"contacts":[{"kind":"email","value":"a@example.com"}]}`，一次 1–32 个已规范化联系方式。返回 `{"avatars":[{"kind":"email","value":"a@example.com","avatar_url":"/api/v1/media/avatars/…"}]}`。只返回联系方式已验证且账号仍有效的用户主动上传的头像；未知地址、未上传头像以及服务器默认头像都省略。
 - `POST /api/v1/orders/quote` 与 `POST /api/v1/orders`：`{"product_id":0,"recipient":{"kind":"phone","value":"13800138000","label":"朋友"}}`。单件礼物直接报价及下单；一次只支持一个联系方式。也接受已有用户的 `recipient_id`，两种形式不可同时提供。下单须带 `Idempotency-Key`，测试支付仍调用 `/api/v1/orders/{id}/pay-test`。购物车路由已移除。
 - 当所选联系方式当前匹配的用户 ID 与保存的联系人 ID 不同（包括当前无人持有）时，报价返回 `recipient_warning`，下单和测试支付返回 HTTP 409、`code: "recipient_identity_changed"`。用户确认风险后，下单请求设置 `confirm_recipient_change: true`；若变化发生在下单后、测试支付前，则支付请求设置 `X-Confirm-Recipient-Change: true`。已确认的订单在支付时重新核对目标，确认目标未再次变化才送出；旧联系人过期和新联系人建立与支付同事务完成。多联系方式联系人中未变更的地址保留在另一个新联系人条目。
 - `GET /api/v1/notifications`、`POST /api/v1/notifications/{id}/read`：只允许本人读取／标记通知。
@@ -61,6 +62,8 @@ LIYU_DELIVERY_TOKEN=由运营配置的服务凭证
 ## 客户端与验证
 
 LiYu 可手工新增／修改电话和邮箱；macOS Contacts 导入只在用户点击后请求系统访问；其他平台使用文件导入。文件选择器支持 UTF-8 CSV／VCF，保留多号码、多邮箱，导入前显示有效／无效／重复统计并要求确认。CSV 使用姓名、电话、邮箱等常见表头；不支持任意列映射和 Excel 工作簿。老的仅姓名联系人会保留，需要补充联系方式才能用于新流程。
+
+熟人列表整行进入详情；详情可修改备注名、联系方式和本机头像，也可删除或送礼。头像优先使用当前账号在本机为该熟人指定的照片，其次使用已验证联系方式对应用户自己上传的服务器头像；无匹配时按联系方式生成稳定的图案。备注名变化不会改变这个图案。
 
 站内通知由 App 轮询并支持已读及打开礼物。目前没有 APNs／FCM 系统推送，支付仍为测试支付。正式邮件／短信要配置上述适配服务。
 

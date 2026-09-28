@@ -3,10 +3,12 @@
 import json
 import os
 import subprocess
+import struct
 import sys
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 
 base = sys.argv[1]
 db = os.environ['DATABASE_URL']
@@ -52,6 +54,27 @@ bind(first_token,'phone',number)
 profile=call('/api/v1/me/profile',token=first_token)
 assert set([a,extra]).issubset(profile['emails']) and number in profile['phones']
 assert sql(f"SELECT count(*) FROM contact_identities WHERE user_id={first_id}")=='3'
+# The address-book lookup exposes only a verified owner's chosen photo.
+lookup=lambda contacts, token=sender, status=200: call('/api/v1/contacts/avatars','POST',
+    {'contacts':contacts},token,status)
+addresses=[dict(kind='email',value=a),dict(kind='phone',value=number),
+    dict(kind='email',value='missing-'+suffix+'@example.test')]
+assert lookup(addresses)['avatars']==[]  # The server's default identicon is omitted.
+lookup(addresses,token=None,status=401)
+def chunk(kind, data):
+    return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data))
+raw=b''.join([b'\x00'+b'\x33\x88\xcc\xff'*16 for _ in range(16)])
+png=(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!IIBBBBB',16,16,8,6,0,0,0))+
+    chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
+request=urllib.request.Request(base+'/api/v1/me/avatar',method='POST',data=png,
+    headers={'Authorization':'Bearer '+first_token,'Content-Type':'image/png'})
+uploaded=json.loads(urllib.request.urlopen(request,timeout=10).read())
+avatar_url=uploaded['avatar_url']
+assert avatar_url.startswith('/api/v1/media/avatars/')
+found=lookup(addresses+addresses[:1])['avatars']
+assert len(found)==2 and all(row['avatar_url']==avatar_url for row in found)
+call('/api/v1/me/avatar','DELETE',token=first_token,status=204)
+assert lookup(addresses)['avatars']==[]
 contact=call('/api/v1/contacts','POST',dict(label='好友',phones=[number],emails=[a,extra]),sender)
 assert sql(f"SELECT bound_user_id FROM sender_contacts WHERE id={contact['id']}")==str(first_id)
 assert len(call('/api/v1/contacts',token=sender)[0]['emails'])==2
