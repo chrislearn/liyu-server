@@ -49,7 +49,7 @@ pub(crate) fn audit(
 
 fn report_sql(module: &str) -> Option<&'static str> {
     Some(match module {
-        "users" => "SELECT u.id,u.identifier,u.display_name,u.is_active,u.created_at,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='phone'),p.phone) AS phone,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='email'),p.email) AS email,(SELECT count(*) FROM sessions s WHERE s.user_id=u.id AND expires_at>now()) AS sessions,(SELECT COALESCE(sum(amount_cents),0) FROM wallet_ledger w WHERE w.user_id=u.id) AS balance_cents FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id",
+        "users" => "SELECT u.id,u.identifier,u.display_name,u.is_active,u.created_at,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='phone' ORDER BY verified_at DESC,id DESC LIMIT 1),p.phone) AS phone,COALESCE((SELECT value FROM contact_identities WHERE user_id=u.id AND kind='email' ORDER BY verified_at DESC,id DESC LIMIT 1),p.email) AS email,(SELECT count(*) FROM sessions s WHERE s.user_id=u.id AND expires_at>now()) AS sessions,(SELECT COALESCE(sum(amount_cents),0) FROM wallet_ledger w WHERE w.user_id=u.id) AS balance_cents FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id",
         "low-stock" => "SELECT id,name,category,price_cents,stock,is_active FROM catalog WHERE is_active AND stock<=10",
         "inventory" | "prices" => "SELECT id,name,category,price_cents,stock,is_active FROM catalog",
         "history" => "SELECT * FROM catalog_history",

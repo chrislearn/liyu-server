@@ -88,7 +88,7 @@ fn profile_json(conn: &mut PgConnection, owner: i64) -> QueryResult<serde_json::
         #[diesel(sql_type=Jsonb)]
         data: serde_json::Value,
     }
-    let verified=diesel::sql_query("SELECT jsonb_object_agg(kind,value) AS data FROM contact_identities WHERE user_id=$1 HAVING count(*)>0")
+    let verified=diesel::sql_query("SELECT jsonb_build_object('phone', (SELECT value FROM contact_identities WHERE user_id=$1 AND kind='phone' ORDER BY verified_at DESC,id DESC LIMIT 1), 'email', (SELECT value FROM contact_identities WHERE user_id=$1 AND kind='email' ORDER BY verified_at DESC,id DESC LIMIT 1), 'phones', COALESCE(jsonb_agg(value ORDER BY verified_at DESC,id DESC) FILTER (WHERE kind='phone'),'[]'::jsonb), 'emails', COALESCE(jsonb_agg(value ORDER BY verified_at DESC,id DESC) FILTER (WHERE kind='email'),'[]'::jsonb)) AS data FROM contact_identities WHERE user_id=$1")
         .bind::<diesel::sql_types::BigInt,_>(owner).get_result::<ContactRow>(conn).optional()?;
     let phone_verified = verified
         .as_ref()
@@ -96,7 +96,11 @@ fn profile_json(conn: &mut PgConnection, owner: i64) -> QueryResult<serde_json::
     let email_verified = verified
         .as_ref()
         .is_some_and(|r| r.data["email"].is_string());
+    let mut phones = json!([]);
+    let mut emails = json!([]);
     if let Some(row) = verified {
+        phones = row.data["phones"].clone();
+        emails = row.data["emails"].clone();
         if let Some(s) = row.data["phone"].as_str() {
             phone = Some(s.into())
         }
@@ -108,7 +112,7 @@ fn profile_json(conn: &mut PgConnection, owner: i64) -> QueryResult<serde_json::
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| crate::avatar::default_url(id));
     Ok(
-        json!({"id":id,"identifier":identifier,"display_name":display_name,"phone":phone,"email":email,"phone_verified":phone_verified,"email_verified":email_verified,"avatar_url":avatar_url}),
+        json!({"id":id,"identifier":identifier,"display_name":display_name,"phone":phone,"email":email,"phones":phones,"emails":emails,"phone_verified":phone_verified,"email_verified":email_verified,"avatar_url":avatar_url}),
     )
 }
 
@@ -226,6 +230,9 @@ async fn bind_contact(req: &mut Request, res: &mut Response, phone_kind: bool) {
             diesel::result::DatabaseErrorKind::UniqueViolation,
             _,
         )) => fail(res, StatusCode::CONFLICT, "contact already in use"),
+        Err(diesel::result::Error::NotFound) => {
+            fail(res, StatusCode::CONFLICT, "contact already in use")
+        }
         Err(_) => fail(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,

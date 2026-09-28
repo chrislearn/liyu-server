@@ -103,6 +103,137 @@ struct JsonRow {
     data: Value,
 }
 
+#[derive(QueryableByName)]
+struct ContactRow {
+    #[diesel(sql_type=BigInt)]
+    id: i64,
+    #[diesel(sql_type=Nullable<BigInt>)]
+    bound_user_id: Option<i64>,
+    #[diesel(sql_type=Text)]
+    label: String,
+}
+
+#[derive(QueryableByName)]
+struct MethodRow {
+    #[diesel(sql_type=Text)]
+    kind: String,
+    #[diesel(sql_type=Text)]
+    value: String,
+}
+
+pub(crate) struct Binding {
+    pub current: Option<i64>,
+    pub previous: Option<i64>,
+    contact_id: Option<i64>,
+    label: String,
+}
+
+impl Binding {
+    pub fn changed(&self) -> bool {
+        self.previous.is_some() && self.previous != self.current
+    }
+    pub fn warning(&self) -> Value {
+        json!({"code":"recipient_identity_changed","message":"此联系方式现在对应的用户与之前保存的联系人不同，继续送礼可能送错人。请确认是否继续。"})
+    }
+}
+
+fn lock_contact_value(conn: &mut PgConnection, kind: &str, value: &str) -> QueryResult<()> {
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(format!("contact:{kind}:{value}"))
+        .execute(conn)?;
+    Ok(())
+}
+
+pub(crate) fn binding(
+    conn: &mut PgConnection,
+    owner: i64,
+    contact: &Value,
+) -> QueryResult<Binding> {
+    let kind = contact["kind"].as_str().unwrap_or("");
+    let value = contact["value"].as_str().unwrap_or("");
+    lock_contact_value(conn, kind, value)?;
+    let current = resolve(conn, contact)?;
+    let saved = sql_query("SELECT c.id,c.bound_user_id,c.label FROM sender_contacts c JOIN sender_contact_methods m ON m.contact_id=c.id WHERE m.owner_id=$1 AND m.kind=$2 AND m.value=$3 AND m.expired_at IS NULL AND c.expired_at IS NULL")
+        .bind::<BigInt,_>(owner).bind::<Text,_>(kind).bind::<Text,_>(value)
+        .get_result::<ContactRow>(conn).optional()?;
+    Ok(Binding {
+        current,
+        previous: saved.as_ref().and_then(|r| r.bound_user_id),
+        contact_id: saved.as_ref().map(|r| r.id),
+        label: saved.map_or_else(
+            || contact["label"].as_str().unwrap_or("").to_owned(),
+            |r| r.label,
+        ),
+    })
+}
+
+fn insert_contact(
+    conn: &mut PgConnection,
+    owner: i64,
+    label: &str,
+    bound: Option<i64>,
+    methods: &[(String, String)],
+) -> QueryResult<i64> {
+    let row = sql_query(
+        "INSERT INTO sender_contacts(owner_id,label,bound_user_id) VALUES($1,$2,$3) RETURNING id",
+    )
+    .bind::<BigInt, _>(owner)
+    .bind::<Text, _>(label)
+    .bind::<Nullable<BigInt>, _>(bound)
+    .get_result::<Id>(conn)?;
+    for (kind, value) in methods {
+        sql_query("INSERT INTO sender_contact_methods(contact_id,owner_id,kind,value) VALUES($1,$2,$3,$4)")
+            .bind::<BigInt,_>(row.id).bind::<BigInt,_>(owner).bind::<Text,_>(kind).bind::<Text,_>(value).execute(conn)?;
+    }
+    Ok(row.id)
+}
+
+// Called in the checkout transaction, after binding() has locked the address.
+pub(crate) fn save_binding(
+    conn: &mut PgConnection,
+    owner: i64,
+    contact: &Value,
+    b: &Binding,
+    confirmed: bool,
+) -> QueryResult<()> {
+    let kind = contact["kind"].as_str().unwrap_or("").to_owned();
+    let value = contact["value"].as_str().unwrap_or("").to_owned();
+    if b.changed() {
+        if !confirmed {
+            return Err(diesel::result::Error::RollbackTransaction);
+        }
+        let old = b
+            .contact_id
+            .ok_or(diesel::result::Error::RollbackTransaction)?;
+        let remaining=sql_query("SELECT kind,value FROM sender_contact_methods WHERE contact_id=$1 AND expired_at IS NULL AND NOT (kind=$2 AND value=$3) ORDER BY kind,value")
+            .bind::<BigInt,_>(old).bind::<Text,_>(&kind).bind::<Text,_>(&value).load::<MethodRow>(conn)?;
+        sql_query("UPDATE sender_contacts SET expired_at=now() WHERE id=$1 AND owner_id=$2 AND expired_at IS NULL")
+            .bind::<BigInt,_>(old).bind::<BigInt,_>(owner).execute(conn)?;
+        sql_query("UPDATE sender_contact_methods SET expired_at=now() WHERE contact_id=$1 AND expired_at IS NULL")
+            .bind::<BigInt,_>(old).execute(conn)?;
+        if !remaining.is_empty() {
+            let methods = remaining
+                .into_iter()
+                .map(|m| (m.kind, m.value))
+                .collect::<Vec<_>>();
+            insert_contact(conn, owner, &b.label, b.previous, &methods)?;
+        }
+        insert_contact(conn, owner, &b.label, b.current, &[(kind, value)])?;
+    } else if let Some(id) = b.contact_id {
+        if b.previous.is_none() && b.current.is_some() {
+            sql_query(
+                "UPDATE sender_contacts SET bound_user_id=$2 WHERE id=$1 AND bound_user_id IS NULL",
+            )
+            .bind::<BigInt, _>(id)
+            .bind::<Nullable<BigInt>, _>(b.current)
+            .execute(conn)?;
+        }
+    } else {
+        insert_contact(conn, owner, &b.label, b.current, &[(kind, value)])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve(conn: &mut PgConnection, r: &Value) -> QueryResult<Option<i64>> {
     let kind = r["kind"].as_str().unwrap_or("");
     let value = r["value"].as_str().unwrap_or("");
@@ -156,9 +287,142 @@ pub(crate) fn attach(
     kind: &str,
     value: &str,
 ) -> QueryResult<()> {
-    sql_query("INSERT INTO contact_identities(user_id,kind,value) VALUES($1,$2,$3) ON CONFLICT(user_id,kind) DO UPDATE SET value=excluded.value,verified_at=now()")
+    lock_contact_value(conn, kind, value)?;
+    sql_query("INSERT INTO contact_identities(user_id,kind,value) VALUES($1,$2,$3) ON CONFLICT(kind,value) DO UPDATE SET verified_at=now() WHERE contact_identities.user_id=excluded.user_id RETURNING id")
+        .bind::<BigInt,_>(uid).bind::<Text,_>(kind).bind::<Text,_>(value).get_result::<Id>(conn)?;
+    sql_query("UPDATE sender_contacts c SET bound_user_id=$1 FROM sender_contact_methods m WHERE m.contact_id=c.id AND m.kind=$2 AND m.value=$3 AND m.expired_at IS NULL AND c.expired_at IS NULL AND c.bound_user_id IS NULL")
         .bind::<BigInt,_>(uid).bind::<Text,_>(kind).bind::<Text,_>(value).execute(conn)?;
     claim_pending(conn, uid)
+}
+
+#[derive(Deserialize)]
+struct ContactInput {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    phones: Vec<String>,
+    #[serde(default)]
+    emails: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ContactValueInput {
+    kind: String,
+    value: String,
+}
+
+#[handler]
+async fn release_identity(req: &mut Request, res: &mut Response) {
+    let Some(owner) = user_id(req) else {
+        return error(res, StatusCode::UNAUTHORIZED, "login required");
+    };
+    let Ok(input) = req.parse_json::<ContactValueInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid contact");
+    };
+    let Some(value) = normalize(&input.kind, &input.value) else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid contact");
+    };
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let result = conn.transaction::<usize, diesel::result::Error, _>(|conn| {
+        lock_contact_value(conn, &input.kind, &value)?;
+        sql_query("DELETE FROM contact_identities WHERE user_id=$1 AND kind=$2 AND value=$3")
+            .bind::<BigInt, _>(owner)
+            .bind::<Text, _>(&input.kind)
+            .bind::<Text, _>(&value)
+            .execute(conn)
+    });
+    match result {
+        Ok(1) => res.render(Json(json!({"released":true}))),
+        Ok(_) => error(res, StatusCode::NOT_FOUND, "contact identity not found"),
+        Err(_) => error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "contact release failed",
+        ),
+    }
+}
+
+#[handler]
+async fn list_contacts(req: &mut Request, res: &mut Response) {
+    let Some(owner) = user_id(req) else {
+        return error(res, StatusCode::UNAUTHORIZED, "login required");
+    };
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let rows=sql_query("SELECT jsonb_build_object('id',c.id,'label',c.label,'phones',COALESCE(jsonb_agg(m.value) FILTER(WHERE m.kind='phone'),'[]'::jsonb),'emails',COALESCE(jsonb_agg(m.value) FILTER(WHERE m.kind='email'),'[]'::jsonb)) AS data FROM sender_contacts c JOIN sender_contact_methods m ON m.contact_id=c.id AND m.expired_at IS NULL WHERE c.owner_id=$1 AND c.expired_at IS NULL GROUP BY c.id ORDER BY c.id")
+        .bind::<BigInt,_>(owner).load::<JsonRow>(&mut conn);
+    match rows {
+        Ok(rows) => res.render(Json(rows.into_iter().map(|r| r.data).collect::<Vec<_>>())),
+        Err(_) => error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "contacts unavailable",
+        ),
+    }
+}
+
+#[handler]
+async fn create_contact(req: &mut Request, res: &mut Response) {
+    let Some(owner) = user_id(req) else {
+        return error(res, StatusCode::UNAUTHORIZED, "login required");
+    };
+    let Ok(input) = req.parse_json::<ContactInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid contact");
+    };
+    if input.label.chars().count() > 100
+        || input.phones.len() + input.emails.len() == 0
+        || input.phones.len() + input.emails.len() > 20
+    {
+        return error(res, StatusCode::BAD_REQUEST, "invalid contact");
+    }
+    let mut methods = Vec::new();
+    for (kind, values) in [("phone", input.phones), ("email", input.emails)] {
+        for raw in values {
+            let Some(value) = normalize(kind, &raw) else {
+                return error(res, StatusCode::BAD_REQUEST, "invalid contact value");
+            };
+            methods.push((kind.to_owned(), value));
+        }
+    }
+    methods.sort();
+    methods.dedup();
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let result = conn.transaction::<Option<i64>, diesel::result::Error, _>(|conn| {
+        let mut bound = None;
+        for (kind, value) in &methods {
+            lock_contact_value(conn, kind, value)?;
+            let current = resolve(conn, &json!({"kind":kind,"value":value}))?;
+            if current.is_some() && bound.is_some() && current != bound {
+                return Ok(None);
+            }
+            if current.is_some() {
+                bound = current;
+            }
+        }
+        insert_contact(conn, owner, input.label.trim(), bound, &methods).map(Some)
+    });
+    match result {
+        Ok(Some(id)) => res.render(Json(json!({"id":id}))),
+        Ok(None) => error(
+            res,
+            StatusCode::CONFLICT,
+            "contact methods belong to different users",
+        ),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => error(res, StatusCode::CONFLICT, "contact already saved"),
+        Err(_) => error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "contact save failed",
+        ),
+    }
 }
 
 pub(crate) fn claim_pending(conn: &mut PgConnection, uid: i64) -> QueryResult<()> {
@@ -319,6 +583,12 @@ async fn claim(req: &mut Request, res: &mut Response) {
 
 pub(crate) fn routes() -> Router {
     Router::new()
+        .push(
+            Router::with_path("api/v1/contacts")
+                .get(list_contacts)
+                .post(create_contact),
+        )
+        .push(Router::with_path("api/v1/me/contact-identities").delete(release_identity))
         .push(Router::with_path("api/v1/auth/challenges").post(challenge))
         .push(Router::with_path("gift-invitations/{token}").get(invitation))
         .push(Router::with_path("api/v1/gift-invitations/{token}/claim").post(claim))

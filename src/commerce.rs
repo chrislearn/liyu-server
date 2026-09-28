@@ -27,6 +27,7 @@ struct Prepared {
     recipient_contact: Option<serde_json::Value>,
     wish_item_id: Option<i64>,
     price_cents: i64,
+    binding: Option<crate::contact_delivery::Binding>,
 }
 
 #[derive(QueryableByName)]
@@ -49,6 +50,10 @@ struct OrderItemRow {
     recipient_id: Option<i64>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     recipient_contact: Option<serde_json::Value>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    recipient_bound_user_id: Option<i64>,
+    #[diesel(sql_type = Bool)]
+    recipient_change_confirmed: bool,
     #[diesel(sql_type = BigInt)]
     price_cents: i64,
     #[diesel(sql_type = Nullable<BigInt>)]
@@ -63,6 +68,8 @@ struct CheckoutInput {
     recipient_id: Option<i64>,
     recipient: Option<crate::contact_delivery::Recipient>,
     wish_item_id: Option<i64>,
+    #[serde(default)]
+    confirm_recipient_change: bool,
 }
 
 #[derive(QueryableByName)]
@@ -137,7 +144,7 @@ fn prepare(
     if input.recipient.is_some() == input.recipient_id.is_some() {
         return Ok(None);
     };
-    let (recipient_id, contact) = if let Some(r) = &input.recipient {
+    let (recipient_id, contact, binding) = if let Some(r) = &input.recipient {
         let Some(value) = crate::contact_delivery::normalize(&r.kind, &r.value) else {
             return Ok(None);
         };
@@ -145,10 +152,8 @@ fn prepare(
             return Ok(None);
         }
         let contact = json!({"kind":r.kind,"value":value,"label":r.label.trim()});
-        (
-            crate::contact_delivery::resolve(conn, &contact)?,
-            Some(contact),
-        )
+        let binding = crate::contact_delivery::binding(conn, uid, &contact)?;
+        (binding.current, Some(contact), Some(binding))
     } else {
         let id = input.recipient_id.unwrap();
         let found = sql_query("SELECT id FROM users WHERE id=$1 AND is_active")
@@ -158,7 +163,7 @@ fn prepare(
         if found.is_none() {
             return Ok(None);
         }
-        (Some(id), None)
+        (Some(id), None, None)
     };
     if recipient_id == Some(uid) {
         return Ok(None);
@@ -181,6 +186,7 @@ fn prepare(
         recipient_contact: contact,
         wish_item_id: input.wish_item_id,
         price_cents: product.price_cents,
+        binding,
     }))
 }
 
@@ -199,20 +205,28 @@ async fn quote(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result = conn.transaction::<Option<(i64, i64)>, diesel::result::Error, _>(|conn| {
-        let Some(prepared) = prepare(conn, uid, &input)? else {
-            return Ok(None);
-        };
-        let (discount, _) = crate::benefits::discount(
-            conn,
-            uid,
-            coupon,
-            &[(prepared.product_id, prepared.price_cents)],
-        )?;
-        Ok(Some((prepared.price_cents, discount)))
-    });
+    let result = conn
+        .transaction::<Option<(i64, i64, Option<serde_json::Value>)>, diesel::result::Error, _>(
+            |conn| {
+                let Some(prepared) = prepare(conn, uid, &input)? else {
+                    return Ok(None);
+                };
+                let (discount, _) = crate::benefits::discount(
+                    conn,
+                    uid,
+                    coupon,
+                    &[(prepared.product_id, prepared.price_cents)],
+                )?;
+                let warning = prepared
+                    .binding
+                    .as_ref()
+                    .filter(|b| b.changed())
+                    .map(|b| b.warning());
+                Ok(Some((prepared.price_cents, discount, warning)))
+            },
+        );
     match result {
-        Ok(Some((subtotal,discount)))=>res.render(Json(json!({"product_id":input.product_id,"subtotal_cents":subtotal,"discount_cents":discount,"total_cents":subtotal-discount}))),
+        Ok(Some((subtotal,discount,warning)))=>res.render(Json(json!({"product_id":input.product_id,"subtotal_cents":subtotal,"discount_cents":discount,"total_cents":subtotal-discount,"recipient_warning":warning}))),
         Ok(None)=>error(res,StatusCode::CONFLICT,"product, recipient or wish unavailable"),
         Err(_)=>error(res,StatusCode::CONFLICT,"coupon unavailable"),
     }
@@ -242,24 +256,34 @@ async fn create_order(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result=conn.transaction::<Option<OrderRow>,diesel::result::Error,_>(|conn|{
+    let result=conn.transaction::<Result<Option<OrderRow>,serde_json::Value>,diesel::result::Error,_>(|conn|{
         sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
         if let Some(prior)=sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
-            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<OrderRow>(conn).optional()? {return Ok(Some(prior))}
-        let Some(item)=prepare(conn,uid,&input)? else {return Ok(None)};
+            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<OrderRow>(conn).optional()? {return Ok(Ok(Some(prior)))}
+        let Some(item)=prepare(conn,uid,&input)? else {return Ok(Ok(None))};
+        if let Some(binding)=&item.binding {
+            if binding.changed() && !input.confirm_recipient_change { return Ok(Err(binding.warning())); }
+            if !binding.changed() {
+                crate::contact_delivery::save_binding(conn,uid,item.recipient_contact.as_ref().unwrap(),binding,false)?;
+            }
+        }
         let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&[(item.product_id,item.price_cents)])?;
         let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,total_cents,status")
             .bind::<BigInt,_>(uid).bind::<BigInt,_>(item.price_cents-discount).bind::<Text,_>(key).bind::<BigInt,_>(item.price_cents).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).get_result::<OrderRow>(conn)?;
         crate::benefits::reserve(conn,uid,coupon,order.id)?;
-        sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact) VALUES ($1,$2,$3,$4,$5,$6)")
-            .bind::<BigInt,_>(order.id).bind::<Integer,_>(item.product_id).bind::<Nullable<BigInt>,_>(item.recipient_id).bind::<BigInt,_>(item.price_cents-allocated[0]).bind::<Nullable<BigInt>,_>(item.wish_item_id).bind::<Nullable<Jsonb>,_>(item.recipient_contact).execute(conn)?;
-        Ok(Some(order))
+        sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind::<BigInt,_>(order.id).bind::<Integer,_>(item.product_id).bind::<Nullable<BigInt>,_>(item.recipient_id).bind::<BigInt,_>(item.price_cents-allocated[0]).bind::<Nullable<BigInt>,_>(item.wish_item_id).bind::<Nullable<Jsonb>,_>(item.recipient_contact).bind::<Nullable<BigInt>,_>(item.binding.as_ref().and_then(|b|b.current)).bind::<Bool,_>(item.binding.as_ref().is_some_and(|b|b.changed() && input.confirm_recipient_change)).execute(conn)?;
+        Ok(Ok(Some(order)))
     });
     match result {
-        Ok(Some(order)) => res.render(Json(
+        Ok(Ok(Some(order))) => res.render(Json(
             json!({"id":order.id,"total_cents":order.total_cents,"status":order.status}),
         )),
-        Ok(None) => error(
+        Ok(Err(warning)) => {
+            res.status_code(StatusCode::CONFLICT);
+            res.render(Json(warning));
+        }
+        Ok(Ok(None)) => error(
             res,
             StatusCode::CONFLICT,
             "product, recipient or wish unavailable",
@@ -314,7 +338,7 @@ async fn get_order(req: &mut Request, res: &mut Response) {
     let Ok(order) = order else {
         return error(res, StatusCode::NOT_FOUND, "order not found");
     };
-    let items: QueryResult<Vec<OrderItemRow>> = sql_query("SELECT id,product_id,recipient_id,recipient_contact,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
+    let items: QueryResult<Vec<OrderItemRow>> = sql_query("SELECT id,product_id,recipient_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
         .bind::<BigInt,_>(oid).load(&mut conn);
     match items {
         Ok(items) => res.render(Json(json!({"id":order.id,"total_cents":order.total_cents,"status":order.status,
@@ -331,19 +355,35 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
     let Some(oid) = req.param::<i64>("id") else {
         return error(res, StatusCode::BAD_REQUEST, "invalid order id");
     };
+    let confirmed = req
+        .headers()
+        .get("X-Confirm-Recipient-Change")
+        .and_then(|v| v.to_str().ok())
+        == Some("true");
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result = conn.transaction::<OrderRow, diesel::result::Error, _>(|conn| {
+    let result = conn.transaction::<Result<OrderRow,serde_json::Value>, diesel::result::Error, _>(|conn| {
         sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
         let order: OrderRow = sql_query("SELECT id,total_cents,status FROM orders WHERE id=$1 AND buyer_id=$2 FOR UPDATE")
             .bind::<BigInt,_>(oid).bind::<BigInt,_>(uid).get_result(conn)?;
-        if order.status == "paid_test" { return Ok(order); }
+        if order.status == "paid_test" { return Ok(Ok(order)); }
         if order.status != "pending" { return Err(diesel::result::Error::RollbackTransaction); }
+        let items: Vec<OrderItemRow> = sql_query("SELECT id,product_id,recipient_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
+            .bind::<BigInt,_>(oid).load(conn)?;
+        for item in &items {
+            if let Some(contact)=&item.recipient_contact {
+                let binding=crate::contact_delivery::binding(conn,uid,contact)?;
+                let snapshot_changed=item.recipient_bound_user_id.is_some_and(|old|Some(old)!=binding.current);
+                let prior_confirmation=item.recipient_change_confirmed && item.recipient_bound_user_id==binding.current;
+                if (binding.changed() || snapshot_changed) && !confirmed && !prior_confirmation {
+                    return Ok(Err(binding.warning()));
+                }
+                crate::contact_delivery::save_binding(conn,uid,contact,&binding,confirmed || prior_confirmation)?;
+            }
+        }
         crate::benefits::redeem(conn,oid)?;
         sql_query("SELECT set_config('liyu.reason','test payment',true)").execute(conn)?;
-        let items: Vec<OrderItemRow> = sql_query("SELECT id,product_id,recipient_id,recipient_contact,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
-            .bind::<BigInt,_>(oid).load(conn)?;
         // Lock/update products in stable ID order; repeated items reserve their total quantity.
         let mut quantities = std::collections::BTreeMap::<i32, i32>::new();
         for item in &items { *quantities.entry(item.product_id).or_default() += 1; }
@@ -377,12 +417,16 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
         }
         sql_query("UPDATE orders SET status='paid_test',paid_at=now() WHERE id=$1")
             .bind::<BigInt,_>(oid).execute(conn)?;
-        Ok(OrderRow { status:"paid_test".into(), ..order })
+        Ok(Ok(OrderRow { status:"paid_test".into(), ..order }))
     });
     match result {
-        Ok(order) => res.render(Json(
+        Ok(Ok(order)) => res.render(Json(
             json!({"id":order.id,"status":order.status,"total_cents":order.total_cents}),
         )),
+        Ok(Err(warning)) => {
+            res.status_code(StatusCode::CONFLICT);
+            res.render(Json(warning));
+        }
         Err(diesel::result::Error::NotFound) => {
             error(res, StatusCode::NOT_FOUND, "order not found")
         }
