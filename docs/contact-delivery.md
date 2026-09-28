@@ -11,7 +11,7 @@
 - `POST /api/v1/auth/challenges`：`{"kind":"email","value":"recipient@example.com","purpose":"register"}`。返回 `challenge_id` 和有效期。`purpose:"bind"` 必须带当前用户 Bearer token。
 - `POST /api/v1/auth/register`：`{"identifier":"recipient@example.com","password":"至少八字符","challenge_id":"…","code":"…"}`。
 - `PUT /api/v1/me/email` 或 `/me/phone`：带 Bearer token，`{"value":"…","challenge_id":"…","code":"…"}`。
-- `POST /api/v1/cart/items`：`{"product_id":0,"recipient":{"kind":"phone","value":"13800138000","label":"朋友"}}`。一次只支持一个联系方式，也兼容旧 `recipient_id` 参数；不能同时提供两种形式。下单及测试支付沿用现有订单 API。
+- `POST /api/v1/orders/quote` 与 `POST /api/v1/orders`：`{"product_id":0,"recipient":{"kind":"phone","value":"13800138000","label":"朋友"}}`。单件礼物直接报价及下单；一次只支持一个联系方式。也接受已有用户的 `recipient_id`，两种形式不可同时提供。下单须带 `Idempotency-Key`，测试支付仍调用 `/api/v1/orders/{id}/pay-test`。购物车路由已移除。
 - `GET /api/v1/notifications`、`POST /api/v1/notifications/{id}/read`：只允许本人读取／标记通知。
 - `GET /gift-invitations/{token}`：注册、登录及验证领取页面，不泄露礼物内容或发送方身份。
 - `POST /api/v1/gift-invitations/{token}/claim`：必须登录且已验证目标联系方式。持有链接本身不能领取别人的礼物；成功领取可重复调用。
@@ -49,7 +49,7 @@ LIYU_DELIVERY_TOKEN=由运营配置的服务凭证
 
 ## 数据迁移与上线
 
-启动时自动执行 `20260928000000_contact_delivery` 迁移：新增联系方式身份、验证码、投递队列表，购物车／订单／礼物允许联系方式收件人，并扩展站内通知。已有用户、好友和礼物保留，不把历史未验证号码推定为真实身份。回滚前必须解决所有无用户 ID 的待领取记录；回滚迁移会拒绝直接丢弃这些记录。部署前按现有数据库流程备份。
+启动时自动执行 `20260928000000_contact_delivery` 迁移：新增联系方式身份、验证码、投递队列表，订单／礼物允许联系方式收件人，并扩展站内通知。已有用户、好友和礼物保留，不把历史未验证号码推定为真实身份。回滚前必须解决所有无用户 ID 的待领取记录；回滚迁移会拒绝直接丢弃这些记录。部署前按现有数据库流程备份。
 
 未注册收件人的礼物到期自动退款、回补库存，复用现有退款账本，避免重复退款。注册和支付并发时后台补充归属，通知事件去重。
 
@@ -60,3 +60,5 @@ LiYu 可手工新增／修改电话和邮箱；macOS Contacts 导入只在用户
 站内通知由 App 轮询并支持已读及打开礼物。目前没有 APNs／FCM 系统推送，支付仍为测试支付。正式邮件／短信要配置上述适配服务。
 
 测试：`cargo test --all-targets -- --test-threads=8`；`tests/contact_delivery_e2e.py` 运行真实隔离 PostgreSQL 与本地 HTTP mock，涵盖非好友送礼、待领取注册归属、绑定归属、通知权限、失败重试、验证码重放、重复支付和退款；`tests/contact_provider_e2e.py` 用本地证书校验 HTTPS 验证正式随机码通道。测试要求数据库名包含 `contact_test`，禁止使用业务数据库。前端覆盖四种窗口宽度下的控件动作、导入确认／取消及联系方式选择。邀请页已进行浏览器视觉检查；系统通讯录权限交互和真实供应商收件箱尚未端到端验证。
+
+购物车入口与 REST API 已移除；历史 `cart_items` 表暂留作升级兼容，服务不再访问它，也未删除旧记录。已存在的订单继续可查询和支付。

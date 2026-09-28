@@ -49,13 +49,12 @@ $recipientProfile = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $rec
 $senderProfile = Invoke-RestMethod "$BaseUrl/api/v1/me/profile" -Headers $sender
 if ($recipientProfile.id -eq $senderProfile.id) { throw 'Profiles are not account-scoped' }
 
-$cartBody = @{ product_id = 0; recipient_id = $recipientProfile.id } | ConvertTo-Json -Compress
-$cartItem = Invoke-RestMethod "$BaseUrl/api/v1/cart/items" -Method Post -Headers $sender -ContentType 'application/json' -Body $cartBody
-$quote = Invoke-RestMethod "$BaseUrl/api/v1/orders/quote" -Method Post -Headers $sender
+$orderBody = @{ product_id = 0; recipient_id = $recipientProfile.id } | ConvertTo-Json -Compress
+$quote = Invoke-RestMethod "$BaseUrl/api/v1/orders/quote" -Method Post -Headers $sender -ContentType 'application/json' -Body $orderBody
 if ($quote.total_cents -ne 10900) { throw 'Server quote used the wrong price' }
 $sender['Idempotency-Key'] = "e2e-$([guid]::NewGuid().ToString('N'))"
-$order = Invoke-RestMethod "$BaseUrl/api/v1/orders" -Method Post -Headers $sender
-$again = Invoke-RestMethod "$BaseUrl/api/v1/orders" -Method Post -Headers $sender
+$order = Invoke-RestMethod "$BaseUrl/api/v1/orders" -Method Post -Headers $sender -ContentType 'application/json' -Body $orderBody
+$again = Invoke-RestMethod "$BaseUrl/api/v1/orders" -Method Post -Headers $sender -ContentType 'application/json' -Body $orderBody
 if ($again.id -ne $order.id) { throw 'Order idempotency failed' }
 $paid = Invoke-RestMethod "$BaseUrl/api/v1/orders/$($order.id)/pay-test" -Method Post -Headers $sender
 $paidAgain = Invoke-RestMethod "$BaseUrl/api/v1/orders/$($order.id)/pay-test" -Method Post -Headers $sender
@@ -149,4 +148,4 @@ ExpectStatus { Invoke-WebRequest "$BaseUrl/api/v1/media/avatars/not-a-uuid" } 40
 # 12. Another user cannot delete or overwrite via someone else's session.
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/me/avatar" -Method Delete } 401
 
-Write-Output "LiYu end-to-end API checks passed: registration/session rotation, 33 products, scoped profile/parcel/order, cart, payment, puzzle, acceptance, legacy state disabled, and avatar upload/media/delete hardening."
+Write-Output "LiYu end-to-end API checks passed: registration/session rotation, 33 products, scoped profile/parcel/direct order, payment, puzzle, acceptance, legacy state disabled, and avatar upload/media/delete hardening."

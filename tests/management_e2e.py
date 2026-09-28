@@ -77,6 +77,7 @@ call('/api/v1/me/coupons',token=token)
 # An API helper with explicit idempotency and coupon headers.
 def user_order(path,method='POST',data=None,key=None,coupon=None,status=200):
     global checks
+    if data is None and path in ('/api/v1/orders','/api/v1/orders/quote'):data={'product_id':pid,'recipient_id':b}
     h={'Authorization':'Bearer '+token,'Content-Type':'application/json'}
     if key:h['Idempotency-Key']=key
     if coupon:h['X-Coupon-Id']=str(coupon)
@@ -85,8 +86,6 @@ def user_order(path,method='POST',data=None,key=None,coupon=None,status=200):
     except urllib.error.HTTPError as e:r=e
     body=r.read();assert r.status==status,(path,r.status,status,body[:500]);checks+=1
     return json.loads(body)
-call('/api/v1/cart','DELETE',token=token)
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 quote=user_order('/api/v1/orders/quote',coupon=issued)
 assert quote['total_cents']==10000 and quote['discount_cents']==2000
 key=str(uuid.uuid4())
@@ -116,7 +115,6 @@ manage('coupon-revoke',issued_b)
 manage('coupon-status',tid,is_active=False)
 call(f'/admin/api/manage/coupon-issue/{tid}','POST',{'user_id':c,'reason':'disabled'},status=409)
 # Refunds are service owned and stock is restored once.
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 order2=user_order('/api/v1/orders',key=str(uuid.uuid4()))
 user_order(f"/api/v1/orders/{order2['id']}/pay-test")
 gift2=call(f'/api/v1/orders/{order2["id"]}',token=token)['items'][0]['gift_id']
@@ -148,12 +146,10 @@ new_user=manage('coupon',0,**dict(template,name='New user',kind='new_user'))['id
 call(f'/admin/api/manage/coupon-issue/{new_user}','POST',{'user_id':a,'reason':'not new'},status=409)
 future=manage('coupon',0,**dict(template,name='Future',starts_at=date(10),expires_at=date(20)))['id']
 future_coupon=manage('coupon-issue',future,user_id=a)['id']
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 user_order('/api/v1/orders/quote',coupon=future_coupon,status=409)
 percentage=manage('coupon',0,**dict(template,name='Percentage capped',discount_kind='percentage',value=1000,max_discount_cents=500))['id']
 percentage_coupon=manage('coupon-issue',percentage,user_id=a)['id']
 assert user_order('/api/v1/orders/quote',coupon=percentage_coupon)['discount_cents']==500
-call('/api/v1/cart','DELETE',token=token)
 # Concurrent stock adjustments cannot oversell.
 stock=next(r for r in report('inventory') if r['id']==pid)['stock']
 manage('stock',pid,delta=1-stock)
@@ -171,11 +167,9 @@ with ThreadPoolExecutor(max_workers=2) as executor:
     raced=list(executor.map(lambda _:raw_manage('coupon-issue',tid2,{'user_id':a}),range(2)))
 assert sorted(code for code,_ in raced)==[200,409]
 cancel_coupon=next(data['id'] for code,data in raced if code==200)
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 cancel_order=user_order('/api/v1/orders',key=str(uuid.uuid4()),coupon=cancel_coupon)
 manage('cancel-order',cancel_order['id'])
 assert next(r for r in report('issued-coupons') if r['id']==cancel_coupon)['status']=='available'
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 exchange_order=user_order('/api/v1/orders',key=str(uuid.uuid4()))
 user_order(f"/api/v1/orders/{exchange_order['id']}/pay-test")
 exchange_gift=call(f"/api/v1/orders/{exchange_order['id']}",token=token)['items'][0]['gift_id']
@@ -190,7 +184,6 @@ with ThreadPoolExecutor(max_workers=2) as executor:
     list(executor.map(lambda _:call(f'/api/v1/gifts/{exchange_gift}/exchange','POST',{'product_id':pid},token=recipient),range(2)))
 assert call('/api/v1/wallet',token=recipient)['balance_cents']==balance-1500
 assert sum(r['gift_id']==exchange_gift for r in report('wallet'))==1
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':b},token=token)
 contract_order=user_order('/api/v1/orders',key=str(uuid.uuid4()))
 user_order(f"/api/v1/orders/{contract_order['id']}/pay-test")
 contract_gift=call(f"/api/v1/orders/{contract_order['id']}",token=token)['items'][0]['gift_id']

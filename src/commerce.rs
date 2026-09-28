@@ -1,4 +1,4 @@
-//! Server-priced test checkout. Cart and order views are buyer-only.
+//! Server-priced direct gift checkout. Order views are buyer-only.
 use crate::{error, pool, user_id};
 use diesel::{
     prelude::*,
@@ -16,21 +16,17 @@ struct IdRow {
 }
 
 #[derive(QueryableByName)]
-struct CartRow {
-    #[diesel(sql_type = BigInt)]
-    id: i64,
-    #[diesel(sql_type = Integer)]
-    product_id: i32,
-    #[diesel(sql_type = Nullable<BigInt>)]
-    recipient_id: Option<i64>,
-    #[diesel(sql_type = Nullable<Jsonb>)]
-    recipient_contact: Option<serde_json::Value>,
-    #[diesel(sql_type = Text)]
-    name: String,
+struct ProductRow {
     #[diesel(sql_type = BigInt)]
     price_cents: i64,
-    #[diesel(sql_type = Nullable<BigInt>)]
+}
+
+struct Prepared {
+    product_id: i32,
+    recipient_id: Option<i64>,
+    recipient_contact: Option<serde_json::Value>,
     wish_item_id: Option<i64>,
+    price_cents: i64,
 }
 
 #[derive(QueryableByName)]
@@ -62,7 +58,7 @@ struct OrderItemRow {
 }
 
 #[derive(Deserialize)]
-struct CartInput {
+struct CheckoutInput {
     product_id: i32,
     recipient_id: Option<i64>,
     recipient: Option<crate::contact_delivery::Recipient>,
@@ -124,158 +120,68 @@ fn valid_wish_claim(
     Ok(row.is_some_and(|r| claim_matches(&r, sender, recipient, product)))
 }
 
-fn cart(conn: &mut PgConnection, uid: i64) -> QueryResult<Vec<CartRow>> {
-    sql_query("SELECT ci.id, ci.product_id, ci.recipient_id, ci.recipient_contact, c.name, c.price_cents,ci.wish_item_id FROM cart_items ci JOIN catalog c ON c.id = ci.product_id WHERE ci.user_id = $1 ORDER BY ci.id")
-        .bind::<BigInt, _>(uid).load(conn)
-}
-
-fn cart_json(rows: &[CartRow]) -> serde_json::Value {
-    json!({"items": rows.iter().map(|r| json!({
-        "id":r.id, "product_id":r.product_id, "recipient_id":if r.recipient_contact.is_some(){None}else{r.recipient_id}, "recipient":r.recipient_contact,
-        "wish_item_id":r.wish_item_id,
-        "name":r.name, "price_cents":r.price_cents,
-        "image_url":format!("/api/v1/media/products/{}/thumb",r.product_id)
-    })).collect::<Vec<_>>(),
-    "total_cents": rows.iter().map(|r| r.price_cents).sum::<i64>()})
-}
-
-#[handler]
-async fn get_cart(req: &mut Request, res: &mut Response) {
-    let Some(uid) = user_id(req) else {
-        return error(res, StatusCode::UNAUTHORIZED, "invalid session");
+fn prepare(
+    conn: &mut PgConnection,
+    uid: i64,
+    input: &CheckoutInput,
+) -> QueryResult<Option<Prepared>> {
+    let product = sql_query(
+        "SELECT price_cents FROM catalog WHERE id=$1 AND is_active AND stock>0 FOR SHARE",
+    )
+    .bind::<Integer, _>(input.product_id)
+    .get_result::<ProductRow>(conn)
+    .optional()?;
+    let Some(product) = product else {
+        return Ok(None);
     };
-    let Ok(mut conn) = pool().get() else {
-        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    if input.recipient.is_some() == input.recipient_id.is_some() {
+        return Ok(None);
     };
-    match cart(&mut conn, uid) {
-        Ok(rows) => res.render(Json(cart_json(&rows))),
-        Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "cart query failed"),
-    }
-}
-
-#[handler]
-async fn add_item(req: &mut Request, res: &mut Response) {
-    let Some(uid) = user_id(req) else {
-        return error(res, StatusCode::UNAUTHORIZED, "invalid session");
-    };
-    let input: CartInput = match req.parse_json().await {
-        Ok(x) => x,
-        Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid JSON"),
-    };
-    let Ok(mut conn) = pool().get() else {
-        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
-    };
-    if input.recipient.is_some() && input.recipient_id.is_some() {
-        return error(res, StatusCode::BAD_REQUEST, "choose one recipient input");
-    }
-    let contact = if let Some(r) = input.recipient {
+    let (recipient_id, contact) = if let Some(r) = &input.recipient {
         let Some(value) = crate::contact_delivery::normalize(&r.kind, &r.value) else {
-            return error(res, StatusCode::BAD_REQUEST, "invalid recipient contact");
+            return Ok(None);
         };
         if r.label.chars().count() > 100 {
-            return error(res, StatusCode::BAD_REQUEST, "recipient label too long");
+            return Ok(None);
         }
-        Some(json!({"kind":r.kind,"value":value,"label":r.label.trim()}))
+        let contact = json!({"kind":r.kind,"value":value,"label":r.label.trim()});
+        (
+            crate::contact_delivery::resolve(conn, &contact)?,
+            Some(contact),
+        )
     } else {
-        None
-    };
-    // Contact resolution remains internal. Public cart views never disclose matching IDs.
-    let recipient_id = if let Some(contact) = &contact {
-        match crate::contact_delivery::resolve(&mut conn, contact) {
-            Ok(id) => id,
-            Err(_) => {
-                return error(
-                    res,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "recipient lookup failed",
-                )
-            }
-        }
-    } else if let Some(id) = input.recipient_id {
+        let id = input.recipient_id.unwrap();
         let found = sql_query("SELECT id FROM users WHERE id=$1 AND is_active")
             .bind::<BigInt, _>(id)
-            .get_result::<IdRow>(&mut conn);
-        if found.is_err() {
-            return error(res, StatusCode::NOT_FOUND, "recipient unavailable");
+            .get_result::<IdRow>(conn)
+            .optional()?;
+        if found.is_none() {
+            return Ok(None);
         }
-        Some(id)
-    } else {
-        return error(res, StatusCode::BAD_REQUEST, "recipient contact required");
+        (Some(id), None)
     };
     if recipient_id == Some(uid) {
-        return error(res, StatusCode::BAD_REQUEST, "cannot send to yourself");
+        return Ok(None);
     }
-    if let Some(wish_item) = input.wish_item_id {
-        if wish_item <= 0
-            || !matches!(
-                valid_wish_claim(
-                    &mut conn,
-                    uid,
-                    recipient_id.unwrap_or(0),
-                    input.product_id,
-                    wish_item,
-                    false
-                ),
-                Ok(true)
-            )
-        {
-            return error(res, StatusCode::CONFLICT, "wish item unavailable");
+    if let Some(wish) = input.wish_item_id {
+        if !valid_wish_claim(
+            conn,
+            uid,
+            recipient_id.unwrap_or(0),
+            input.product_id,
+            wish,
+            false,
+        )? {
+            return Ok(None);
         }
     }
-    let available =
-        sql_query("SELECT id::bigint AS id FROM catalog WHERE id=$1 AND is_active AND stock>0")
-            .bind::<Integer, _>(input.product_id)
-            .get_result::<IdRow>(&mut conn)
-            .optional();
-    if !matches!(available, Ok(Some(_))) {
-        return error(res, StatusCode::CONFLICT, "product unavailable");
-    }
-    let inserted: QueryResult<IdRow> = sql_query("INSERT INTO cart_items (user_id,product_id,recipient_id,wish_item_id,recipient_contact) VALUES ($1,$2,$3,$4,$5) RETURNING id")
-        .bind::<BigInt, _>(uid).bind::<Integer, _>(input.product_id)
-        .bind::<Nullable<BigInt>, _>(recipient_id).bind::<Nullable<BigInt>,_>(input.wish_item_id).bind::<Nullable<Jsonb>,_>(contact).get_result(&mut conn);
-    match inserted {
-        Ok(row) => res.render(Json(json!({"id":row.id}))),
-        Err(_) => error(res, StatusCode::BAD_REQUEST, "invalid product"),
-    }
-}
-
-#[handler]
-async fn delete_item(req: &mut Request, res: &mut Response) {
-    let Some(uid) = user_id(req) else {
-        return error(res, StatusCode::UNAUTHORIZED, "invalid session");
-    };
-    let Some(item_id) = req.param::<i64>("id") else {
-        return error(res, StatusCode::BAD_REQUEST, "invalid item id");
-    };
-    let Ok(mut conn) = pool().get() else {
-        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
-    };
-    let removed = sql_query("DELETE FROM cart_items WHERE id = $1 AND user_id = $2")
-        .bind::<BigInt, _>(item_id)
-        .bind::<BigInt, _>(uid)
-        .execute(&mut conn);
-    match removed {
-        Ok(1) => res.render(Json(json!({"deleted":true}))),
-        Ok(_) => error(res, StatusCode::NOT_FOUND, "item not found"),
-        Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "cart delete failed"),
-    }
-}
-
-#[handler]
-async fn clear_cart(req: &mut Request, res: &mut Response) {
-    let Some(uid) = user_id(req) else {
-        return error(res, StatusCode::UNAUTHORIZED, "invalid session");
-    };
-    let Ok(mut conn) = pool().get() else {
-        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
-    };
-    match sql_query("DELETE FROM cart_items WHERE user_id = $1")
-        .bind::<BigInt, _>(uid)
-        .execute(&mut conn)
-    {
-        Ok(_) => res.render(Json(json!({"items":[]}))),
-        Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "cart clear failed"),
-    }
+    Ok(Some(Prepared {
+        product_id: input.product_id,
+        recipient_id,
+        recipient_contact: contact,
+        wish_item_id: input.wish_item_id,
+        price_cents: product.price_cents,
+    }))
 }
 
 #[handler]
@@ -283,35 +189,32 @@ async fn quote(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
     };
-    let Ok(mut conn) = pool().get() else {
-        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    let Ok(input) = req.parse_json::<CheckoutInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
     };
     let coupon = match crate::benefits::coupon_id(req) {
         Ok(v) => v,
         Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid coupon id"),
     };
-    match cart(&mut conn, uid) {
-        Ok(rows) if !rows.is_empty() => {
-            let items = rows
-                .iter()
-                .map(|r| (r.product_id, r.price_cents))
-                .collect::<Vec<_>>();
-            match conn.transaction::<_, diesel::result::Error, _>(|conn| {
-                crate::benefits::discount(conn, uid, coupon, &items)
-            }) {
-                Ok((discount, _)) => {
-                    let mut data = cart_json(&rows);
-                    data["subtotal_cents"] = data["total_cents"].clone();
-                    data["discount_cents"] = json!(discount);
-                    data["total_cents"] =
-                        json!(items.iter().map(|(_, p)| p).sum::<i64>() - discount);
-                    res.render(Json(data));
-                }
-                Err(_) => error(res, StatusCode::CONFLICT, "coupon unavailable"),
-            }
-        }
-        Ok(_) => error(res, StatusCode::BAD_REQUEST, "cart is empty"),
-        Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "quote failed"),
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let result = conn.transaction::<Option<(i64, i64)>, diesel::result::Error, _>(|conn| {
+        let Some(prepared) = prepare(conn, uid, &input)? else {
+            return Ok(None);
+        };
+        let (discount, _) = crate::benefits::discount(
+            conn,
+            uid,
+            coupon,
+            &[(prepared.product_id, prepared.price_cents)],
+        )?;
+        Ok(Some((prepared.price_cents, discount)))
+    });
+    match result {
+        Ok(Some((subtotal,discount)))=>res.render(Json(json!({"product_id":input.product_id,"subtotal_cents":subtotal,"discount_cents":discount,"total_cents":subtotal-discount}))),
+        Ok(None)=>error(res,StatusCode::CONFLICT,"product, recipient or wish unavailable"),
+        Err(_)=>error(res,StatusCode::CONFLICT,"coupon unavailable"),
     }
 }
 
@@ -319,6 +222,9 @@ async fn quote(req: &mut Request, res: &mut Response) {
 async fn create_order(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
+    };
+    let Ok(input) = req.parse_json::<CheckoutInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
     };
     let coupon = match crate::benefits::coupon_id(req) {
         Ok(v) => v,
@@ -336,53 +242,29 @@ async fn create_order(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result = conn.transaction::<OrderRow, diesel::result::Error, _>(|conn| {
+    let result=conn.transaction::<Option<OrderRow>,diesel::result::Error,_>(|conn|{
         sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
-        let prior: QueryResult<OrderRow> = sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
-            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result(conn);
-        if let Ok(order) = prior { return Ok(order); }
-        let rows = cart(conn, uid)?;
-        if rows.is_empty() { return Err(diesel::result::Error::NotFound); }
-        for row in &rows {
-            let available = sql_query("SELECT id::bigint AS id FROM catalog WHERE id=$1 AND is_active AND stock>0")
-                .bind::<Integer,_>(row.product_id).get_result::<IdRow>(conn).optional()?;
-            if available.is_none() { return Err(diesel::result::Error::RollbackTransaction); }
-            if let Some(wish_item) = row.wish_item_id {
-                if !valid_wish_claim(conn,uid,row.recipient_id.unwrap_or(0),row.product_id,wish_item,false)? {
-                    return Err(diesel::result::Error::RollbackTransaction);
-                }
-            }
-        }
-        let total = rows.iter().try_fold(0_i64, |sum, row| sum.checked_add(row.price_cents))
-            .ok_or(diesel::result::Error::RollbackTransaction)?;
-        let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&rows.iter().map(|r|(r.product_id,r.price_cents)).collect::<Vec<_>>())?;
-        let order: OrderRow = sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,total_cents,status")
-            .bind::<BigInt,_>(uid).bind::<BigInt,_>(total-discount).bind::<Text,_>(key).bind::<BigInt,_>(total).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).get_result(conn)?;
+        if let Some(prior)=sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
+            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<OrderRow>(conn).optional()? {return Ok(Some(prior))}
+        let Some(item)=prepare(conn,uid,&input)? else {return Ok(None)};
+        let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&[(item.product_id,item.price_cents)])?;
+        let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,total_cents,status")
+            .bind::<BigInt,_>(uid).bind::<BigInt,_>(item.price_cents-discount).bind::<Text,_>(key).bind::<BigInt,_>(item.price_cents).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).get_result::<OrderRow>(conn)?;
         crate::benefits::reserve(conn,uid,coupon,order.id)?;
-        for (index,row) in rows.into_iter().enumerate() {
-            sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact) VALUES ($1,$2,$3,$4,$5,$6)")
-                .bind::<BigInt,_>(order.id).bind::<Integer,_>(row.product_id)
-                .bind::<Nullable<BigInt>,_>(row.recipient_id).bind::<BigInt,_>(row.price_cents-allocated[index])
-                .bind::<Nullable<BigInt>,_>(row.wish_item_id).bind::<Nullable<Jsonb>,_>(row.recipient_contact).execute(conn)?;
-        }
-        sql_query("DELETE FROM cart_items WHERE user_id=$1").bind::<BigInt,_>(uid).execute(conn)?;
-        Ok(order)
+        sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind::<BigInt,_>(order.id).bind::<Integer,_>(item.product_id).bind::<Nullable<BigInt>,_>(item.recipient_id).bind::<BigInt,_>(item.price_cents-allocated[0]).bind::<Nullable<BigInt>,_>(item.wish_item_id).bind::<Nullable<Jsonb>,_>(item.recipient_contact).execute(conn)?;
+        Ok(Some(order))
     });
     match result {
-        Ok(order) => res.render(Json(
+        Ok(Some(order)) => res.render(Json(
             json!({"id":order.id,"total_cents":order.total_cents,"status":order.status}),
         )),
-        Err(diesel::result::Error::NotFound) => {
-            error(res, StatusCode::BAD_REQUEST, "cart is empty")
-        }
-        Err(diesel::result::Error::RollbackTransaction) => {
-            error(res, StatusCode::CONFLICT, "product or wish unavailable")
-        }
-        Err(_) => error(
+        Ok(None) => error(
             res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "order create failed",
+            StatusCode::CONFLICT,
+            "product, recipient or wish unavailable",
         ),
+        Err(_) => error(res, StatusCode::CONFLICT, "coupon or order unavailable"),
     }
 }
 
@@ -510,13 +392,6 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
 
 pub fn routes() -> Router {
     Router::new()
-        .push(
-            Router::with_path("api/v1/cart")
-                .get(get_cart)
-                .delete(clear_cart),
-        )
-        .push(Router::with_path("api/v1/cart/items").post(add_item))
-        .push(Router::with_path("api/v1/cart/items/{id}").delete(delete_item))
         .push(Router::with_path("api/v1/orders/quote").post(quote))
         .push(
             Router::with_path("api/v1/orders")

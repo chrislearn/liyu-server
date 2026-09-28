@@ -27,12 +27,10 @@ $detail = Invoke-RestMethod "$base/api/v1/wishlists/$($wishlist.id)" -Headers (A
 $wishItemId = $detail.items[0].id
 
 function MakeOrder($token) {
-    Invoke-RestMethod "$base/api/v1/cart" -Method Delete -Headers (AuthHeaders $token) | Out-Null
-    $cartBody = @{ product_id = 0; recipient_id = $owner.id; wish_item_id = $wishItemId } | ConvertTo-Json
-    Invoke-RestMethod "$base/api/v1/cart/items" -Method Post -Headers (AuthHeaders $token) -ContentType 'application/json' -Body $cartBody | Out-Null
+    $orderBody = @{ product_id = 0; recipient_id = $owner.id; wish_item_id = $wishItemId } | ConvertTo-Json
     $headers = AuthHeaders $token
     $headers['Idempotency-Key'] = [guid]::NewGuid().ToString()
-    (Invoke-RestMethod "$base/api/v1/orders" -Method Post -Headers $headers -ContentType 'application/json' -Body '{}').id
+    (Invoke-RestMethod "$base/api/v1/orders" -Method Post -Headers $headers -ContentType 'application/json' -Body $orderBody).id
 }
 
 $firstOrder = MakeOrder $firstToken

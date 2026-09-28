@@ -70,17 +70,18 @@ recipient=registered['token'];uid=registered['user']['id']
 assert sql(f"SELECT count(*) FROM friendships WHERE user_low_id=LEAST(1,{uid}) AND user_high_id=GREATEST(1,{uid})")=='0'
 
 def send(kind,value,label='同名收件人'):
-    call('/api/v1/cart','DELETE',token=sender)
-    call('/api/v1/cart/items','POST',dict(product_id=0,recipient=dict(kind=kind,value=value,label=label)),sender)
-    cart=call('/api/v1/cart',token=sender)
-    assert len(cart['items'])==1 and cart['items'][0]['recipient_id'] is None
-    key=str(uuid.uuid4());order=call('/api/v1/orders','POST',{},sender,key=key)
-    assert call('/api/v1/orders','POST',{},sender,key=key)['id']==order['id']
+    body=dict(product_id=0,recipient=dict(kind=kind,value=value,label=label))
+    assert call('/api/v1/orders/quote','POST',body,sender)['total_cents']>0
+    key=str(uuid.uuid4());order=call('/api/v1/orders','POST',body,sender,key=key)
+    assert call('/api/v1/orders','POST',body,sender,key=key)['id']==order['id']
     call(f"/api/v1/orders/{order['id']}/pay-test",'POST',{},sender)
     call(f"/api/v1/orders/{order['id']}/pay-test",'POST',{},sender)
     detail=call(f"/api/v1/orders/{order['id']}",token=sender)
+    assert len(detail['items'])==1 and detail['items'][0]['recipient_id'] is None
     return detail['items'][0]['gift_id']
 
+call('/api/v1/cart',token=sender,status=404)
+call('/api/v1/cart/items','POST',dict(product_id=0,recipient_id=2),sender,status=404)
 gift=send('email','recipient-'+suffix+'@example.test')
 assert sql(f'SELECT recipient_id FROM gifts WHERE id={gift}')==str(uid)
 assert sql(f'SELECT count(*) FROM notifications WHERE gift_id={gift}')=='1'
@@ -89,7 +90,7 @@ notifications=call('/api/v1/notifications',token=recipient)
 n=next(n for n in notifications if n['gift_id']==gift)
 call(f"/api/v1/notifications/{n['id']}/read",'POST',{},sender,status=404)
 call(f"/api/v1/notifications/{n['id']}/read",'POST',{},recipient)
-call('/api/v1/cart/items','POST',dict(product_id=0,recipient=dict(kind='email',value='recipient-'+suffix+'@example.test')),recipient,status=400)
+call('/api/v1/orders','POST',dict(product_id=0,recipient=dict(kind='email',value='recipient-'+suffix+'@example.test')),recipient,status=409,key=str(uuid.uuid4()))
 
 unknown='waiting-'+suffix+'@example.test'
 pending=send('email',unknown)

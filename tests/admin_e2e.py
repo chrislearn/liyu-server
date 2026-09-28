@@ -82,29 +82,20 @@ assert oversize.stdout == b'413', oversize.stdout
 checks += 1
 headers={'Authorization':'Bearer '+user['token']}
 recipient=call('/api/v1/auth/login','POST',{'identifier':'linzhou@liyu.test','password':'123456'},opener=plain)['user']['id']
-call('/api/v1/cart','DELETE',opener=plain,headers=headers)
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':recipient},opener=plain,headers=headers)
-order=call('/api/v1/orders','POST',opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
+order=call('/api/v1/orders','POST',{'product_id':pid,'recipient_id':recipient},opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
 p['is_active']=False
 call(f'/admin/api/products/{pid}','PUT',p)
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':recipient},status=409,opener=plain,headers=headers)
+call('/api/v1/orders','POST',{'product_id':pid,'recipient_id':recipient},status=409,opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
 call(f'/api/v1/orders/{order["id"]}/pay-test','POST',status=409,opener=plain,headers=headers)
 p['is_active']=True
 call(f'/admin/api/products/{pid}','PUT',p)
 call(f'/api/v1/orders/{order["id"]}/pay-test','POST',opener=plain,headers=headers)
 call(f'/api/v1/orders/{order["id"]}/pay-test','POST',opener=plain,headers=headers)
 assert call(f'/api/v1/catalog/{pid}')['stock']==1
-# Multiple cart lines must reserve the aggregate quantity or roll back completely.
-for _ in range(2):
-    call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':recipient},opener=plain,headers=headers)
-multiple=call('/api/v1/orders','POST',opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
-call(f'/api/v1/orders/{multiple["id"]}/pay-test','POST',status=409,opener=plain,headers=headers)
-assert call(f'/api/v1/catalog/{pid}')['stock']==1
 # Two pending orders racing for the final unit must yield one winner.
 pending=[]
 for _ in range(2):
-    call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':recipient},opener=plain,headers=headers)
-    pending.append(call('/api/v1/orders','POST',opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})['id'])
+        pending.append(call('/api/v1/orders','POST',{'product_id':pid,'recipient_id':recipient},opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})['id'])
 def pay(order_id):
     req=urllib.request.Request(base+f'/api/v1/orders/{order_id}/pay-test',method='POST',headers=headers)
     try:
@@ -114,7 +105,7 @@ with ThreadPoolExecutor(max_workers=2) as workers:
     assert sorted(workers.map(pay,pending))==[200,409]
 checks += 2
 assert call(f'/api/v1/catalog/{pid}')['stock']==0
-call('/api/v1/cart/items','POST',{'product_id':pid,'recipient_id':recipient},status=409,opener=plain,headers=headers)
+call('/api/v1/orders','POST',{'product_id':pid,'recipient_id':recipient},status=409,opener=plain,headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
 call('/admin/api/logout','POST',status=204)
 call('/admin/api/me',status=401)
 print(f'Admin integration: {checks} HTTP checks passed (independent login, CSRF, CRUD, media, stock, logout).')
