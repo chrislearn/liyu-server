@@ -3,7 +3,7 @@
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 use salvo::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -61,6 +61,8 @@ struct GiftView {
     identity_known: bool,
     #[diesel(sql_type = Nullable<Text>)]
     voucher_code: Option<String>,
+    #[diesel(sql_type = BigInt)]
+    expires_at: i64,
     #[diesel(sql_type = Bool)]
     expired: bool,
 }
@@ -81,6 +83,10 @@ struct SenderView {
     price_cents: i64,
     #[diesel(sql_type = Text)]
     state: String,
+    #[diesel(sql_type = Text)]
+    contract_text: String,
+    #[diesel(sql_type = BigInt)]
+    expires_at: i64,
     #[diesel(sql_type = Bool)]
     expired: bool,
     #[diesel(sql_type = Bool)]
@@ -89,16 +95,51 @@ struct SenderView {
     recipient_confirmed: bool,
 }
 
+#[derive(QueryableByName, Serialize)]
+struct ContractTemplate {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+    #[diesel(sql_type = Text)]
+    label: String,
+    #[diesel(sql_type = Text)]
+    body: String,
+}
+
+#[derive(QueryableByName, Serialize)]
+struct ContractRow {
+    #[diesel(sql_type = BigInt)]
+    gift_id: i64,
+    #[diesel(sql_type = Bool)]
+    mine: bool,
+    #[diesel(sql_type = Text)]
+    peer_name: String,
+    #[diesel(sql_type = Integer)]
+    product_id: i32,
+    #[diesel(sql_type = Text)]
+    contract_text: String,
+    #[diesel(sql_type = Text)]
+    status: String,
+    #[diesel(sql_type = Text)]
+    created_on: String,
+}
+
+#[derive(QueryableByName)]
+struct ExpiredId {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+}
+
 const GIFT_VIEW_SELECT: &str = "SELECT g.id,g.sender_id, \
     su.display_name AS sender_name, \
     g.product_id,g.price_cents,c.physical,g.state,g.unlock_kind,g.clue, \
     g.message,g.contract_text,g.attempts,g.identity_known,g.voucher_code, \
+    extract(epoch from g.expires_at)::bigint AS expires_at, \
     (g.expires_at<=now() AND g.state IN ('sealed','opened')) AS expired \
     FROM gifts g JOIN users su ON su.id=g.sender_id \
     JOIN catalog c ON c.id=g.product_id";
 
 const SENDER_VIEW_SELECT: &str = "SELECT g.id,COALESCE(g.recipient_id,0) AS recipient_id,COALESCE(NULLIF(g.recipient_contact->>'label',''),g.recipient_contact->>'value',ru.display_name,'待领取') AS recipient_name, \
-    g.product_id,g.price_cents,g.state,COALESCE((SELECT status FROM delivery_outbox o WHERE o.gift_id=g.id),'in_app') AS notification_status, \
+    g.product_id,g.price_cents,g.state,g.contract_text,extract(epoch from g.expires_at)::bigint AS expires_at,COALESCE((SELECT status FROM delivery_outbox o WHERE o.gift_id=g.id),'in_app') AS notification_status, \
     (g.expires_at<=now() AND g.state IN ('sealed','opened')) AS expired, \
     (s.delivered_at IS NOT NULL) AS carrier_delivered, \
     (s.recipient_confirmed_at IS NOT NULL) AS recipient_confirmed \
@@ -182,15 +223,23 @@ fn sender_state(g: &SenderView) -> &str {
 fn sender_projection(g: SenderView) -> Value {
     json!({
         "id": g.id,
-        "recipient": {"display_name":g.recipient_name},
+        "recipient": {"id":if g.recipient_id==0 {None}else{Some(g.recipient_id)},"display_name":g.recipient_name},
         "delivery_status":if g.recipient_id==0 {"pending_claim"}else{"assigned"},
         "notification_status":g.notification_status,
         "product_id": g.product_id,
         "price_cents": g.price_cents,
+        "expires_at": g.expires_at,
         "state": sender_state(&g),
         "carrier_delivered": g.carrier_delivered,
         "recipient_confirmed": g.recipient_confirmed,
     })
+}
+
+fn sender_detail_projection(g: SenderView) -> Value {
+    let contract_text = g.contract_text.clone();
+    let mut result = sender_projection(g);
+    result["contract_text"] = json!(contract_text);
+    result
 }
 
 fn recipient_projection(g: GiftView) -> Value {
@@ -202,6 +251,8 @@ fn recipient_projection(g: GiftView) -> Value {
         "unlock_kind": g.unlock_kind,
         "clue": g.clue,
         "attempts_left": (3 - g.attempts).max(0),
+        "expires_at": g.expires_at,
+        "sender": null,
     });
     if revealed {
         result["product_id"] = json!(g.product_id);
@@ -249,6 +300,26 @@ fn release_wish(conn: &mut PgConnection, id: i64) -> QueryResult<()> {
     Ok(())
 }
 
+fn settle_expired(conn: &mut PgConnection, uid: i64) -> QueryResult<()> {
+    conn.transaction(|conn| {
+        let rows = diesel::sql_query(
+            "SELECT id FROM gifts WHERE (sender_id=$1 OR recipient_id=$1) \
+             AND state IN ('sealed','opened') AND expires_at<=now() \
+             ORDER BY id FOR UPDATE SKIP LOCKED",
+        )
+        .bind::<BigInt, _>(uid)
+        .load::<ExpiredId>(conn)?;
+        for row in rows {
+            crate::benefits::refund(conn, row.id, "expired")?;
+            diesel::sql_query("UPDATE gifts SET state='expired',settled_at=now() WHERE id=$1")
+                .bind::<BigInt, _>(row.id)
+                .execute(conn)?;
+            release_wish(conn, row.id)?;
+        }
+        Ok(())
+    })
+}
+
 #[handler]
 async fn inbox(req: &mut Request, res: &mut Response) {
     let Some(uid) = requester(req, res) else {
@@ -257,6 +328,9 @@ async fn inbox(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
+    if settle_expired(&mut conn, uid).is_err() {
+        return error(res, StatusCode::INTERNAL_SERVER_ERROR, "gift expiry failed");
+    }
     let sql = format!(
         "{GIFT_VIEW_SELECT} WHERE g.recipient_id=$1 AND g.available_at<=now() \
          AND g.state<>'withdrawn' ORDER BY g.available_at DESC,g.id DESC LIMIT 100"
@@ -282,6 +356,9 @@ async fn outbox(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
+    if settle_expired(&mut conn, uid).is_err() {
+        return error(res, StatusCode::INTERNAL_SERVER_ERROR, "gift expiry failed");
+    }
     let sql = format!(
         "{SENDER_VIEW_SELECT} WHERE g.sender_id=$1 ORDER BY g.created_at DESC,g.id DESC LIMIT 100"
     );
@@ -309,6 +386,9 @@ async fn detail(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
+    if settle_expired(&mut conn, uid).is_err() {
+        return error(res, StatusCode::INTERNAL_SERVER_ERROR, "gift expiry failed");
+    }
     let sender_sql = format!("{SENDER_VIEW_SELECT} WHERE g.id=$1 AND g.sender_id=$2");
     let sender = diesel::sql_query(sender_sql)
         .bind::<BigInt, _>(id)
@@ -317,7 +397,7 @@ async fn detail(req: &mut Request, res: &mut Response) {
         .optional();
     match sender {
         Ok(Some(row)) => {
-            res.render(Json(sender_projection(row)));
+            res.render(Json(sender_detail_projection(row)));
             return;
         }
         Ok(None) => {}
@@ -546,6 +626,12 @@ async fn accept(req: &mut Request, res: &mut Response) {
         .bind::<BigInt, _>(id)
         .bind::<Nullable<Text>, _>(voucher)
         .execute(conn)?;
+        diesel::sql_query(
+            "INSERT INTO gift_contracts(gift_id) SELECT id FROM gifts \
+             WHERE id=$1 AND contract_text<>'' ON CONFLICT(gift_id) DO NOTHING",
+        )
+        .bind::<BigInt, _>(id)
+        .execute(conn)?;
         Ok(Some("accepted"))
     });
     match result {
@@ -596,8 +682,63 @@ async fn withdraw(req: &mut Request, res: &mut Response) {
     }
 }
 
+#[handler]
+async fn contract_templates(req: &mut Request, res: &mut Response) {
+    if requester(req, res).is_none() {
+        return;
+    }
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    match diesel::sql_query(
+        "SELECT id,label,body FROM contract_templates WHERE is_active ORDER BY sort_order,id",
+    )
+    .load::<ContractTemplate>(&mut conn)
+    {
+        Ok(rows) => res.render(Json(rows)),
+        Err(_) => error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "contract templates query failed",
+        ),
+    }
+}
+
+#[handler]
+async fn contracts(req: &mut Request, res: &mut Response) {
+    let Some(uid) = requester(req, res) else {
+        return;
+    };
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let rows = diesel::sql_query(
+        "SELECT g.id AS gift_id,(g.recipient_id=$1) AS mine, \
+         CASE WHEN g.recipient_id=$1 THEN sender.display_name ELSE recipient.display_name END AS peer_name, \
+         g.product_id,g.contract_text,COALESCE(c.status,'pending') AS status, \
+         to_char(g.created_at,'YYYY-MM-DD') AS created_on \
+         FROM gifts g JOIN users sender ON sender.id=g.sender_id \
+         JOIN users recipient ON recipient.id=g.recipient_id \
+         LEFT JOIN gift_contracts c ON c.gift_id=g.id \
+         WHERE (g.sender_id=$1 OR g.recipient_id=$1) AND g.state='accepted' \
+         AND g.contract_text<>'' ORDER BY g.created_at DESC,g.id DESC LIMIT 100",
+    )
+    .bind::<BigInt, _>(uid)
+    .load::<ContractRow>(&mut conn);
+    match rows {
+        Ok(rows) => res.render(Json(rows)),
+        Err(_) => error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "contracts query failed",
+        ),
+    }
+}
+
 pub fn routes() -> Router {
     Router::new()
+        .push(Router::with_path("api/v1/contract-templates").get(contract_templates))
+        .push(Router::with_path("api/v1/contracts").get(contracts))
         .push(Router::with_path("api/v1/gifts/inbox").get(inbox))
         .push(Router::with_path("api/v1/gifts/outbox").get(outbox))
         .push(Router::with_path("api/v1/gifts/{id}").get(detail))
@@ -628,6 +769,7 @@ mod tests {
             attempts: 0,
             identity_known: false,
             voucher_code: Some("PRIVATE-CODE".into()),
+            expires_at: 1_800_000_000,
             expired: false,
         }
     }
@@ -641,6 +783,8 @@ mod tests {
             product_id: 17,
             price_cents: 89900,
             state: state.into(),
+            contract_text: "有空喝杯咖啡".into(),
+            expires_at: 1_800_000_000,
             expired: false,
             carrier_delivered: false,
             recipient_confirmed: false,
@@ -677,11 +821,12 @@ mod tests {
             view,
             json!({
                 "id": 5,
-                "recipient": {"display_name":"林舟"},
+                "recipient": {"id":2,"display_name":"林舟"},
                 "delivery_status":"assigned",
                 "notification_status":"in_app",
                 "product_id": 17,
                 "price_cents": 89900,
+                "expires_at": 1_800_000_000,
                 "state": "handled",
                 "carrier_delivered": true,
                 "recipient_confirmed": true,
@@ -697,6 +842,17 @@ mod tests {
         ] {
             assert!(!view.to_string().contains(secret));
         }
+    }
+
+    #[test]
+    fn sender_detail_includes_own_attached_agreement_only() {
+        let sender_view = sender_detail_projection(sender_fixture("sealed"));
+        assert_eq!(sender_view["contract_text"], "有空喝杯咖啡");
+        assert!(!sender_view.to_string().contains("tracking_number"));
+        assert!(!sender_view.to_string().contains("recipient_address"));
+        assert!(sender_projection(sender_fixture("sealed"))
+            .get("contract_text")
+            .is_none());
     }
 
     #[test]

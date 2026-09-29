@@ -8,6 +8,7 @@ use diesel::{
 use salvo::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashSet;
 
 #[derive(QueryableByName)]
 struct IdRow {
@@ -65,11 +66,61 @@ struct OrderItemRow {
 #[derive(Deserialize)]
 struct CheckoutInput {
     product_id: i32,
+    expires_hours: Option<i32>,
     recipient_id: Option<i64>,
     recipient: Option<crate::contact_delivery::Recipient>,
     wish_item_id: Option<i64>,
     #[serde(default)]
     confirm_recipient_change: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CheckoutRequest {
+    Batch {
+        items: Vec<CheckoutInput>,
+        expires_hours: Option<i32>,
+    },
+    Single(CheckoutInput),
+}
+
+impl CheckoutRequest {
+    fn parts(self) -> Option<(Vec<CheckoutInput>, i32)> {
+        let (items, expires_hours) = match self {
+            Self::Batch {
+                items,
+                expires_hours,
+            } => (items, expires_hours.unwrap_or(24)),
+            Self::Single(item) => {
+                let expires_hours = item.expires_hours.unwrap_or(24);
+                (vec![item], expires_hours)
+            }
+        };
+        if items.is_empty() || items.len() > 100 || !(1..=720).contains(&expires_hours) {
+            return None;
+        }
+        let mut recipients = HashSet::new();
+        let mut wish_items = HashSet::new();
+        for item in &items {
+            if let Some(id) = item.recipient_id {
+                if !recipients.insert(id) {
+                    return None;
+                }
+            }
+            if let Some(id) = item.wish_item_id {
+                if !wish_items.insert(id) {
+                    return None;
+                }
+            }
+        }
+        Some((items, expires_hours))
+    }
+}
+
+#[derive(QueryableByName)]
+struct ExpiryHoursRow {
+    #[diesel(sql_type = Integer)]
+    gift_expires_hours: i32,
 }
 
 #[derive(QueryableByName)]
@@ -111,7 +162,7 @@ fn valid_wish_claim(
     let lock_clause = if lock { " FOR UPDATE OF wi,w" } else { "" };
     let sql = format!("SELECT w.owner_id,wi.product_id AS exact_product_id,wi.kind, \
         c.kind AS selected_kind,(wi.claimed_gift_id IS NOT NULL) AS claimed, \
-        (w.closed_at IS NULL AND w.event_on>=CURRENT_DATE-7) AS is_open, \
+        (w.closed_at IS NULL AND w.expires_at>now() AND w.event_on>=CURRENT_DATE-7) AS is_open, \
         (EXISTS (SELECT 1 FROM friendships f WHERE f.status='accepted' \
             AND f.user_low_id=LEAST(w.owner_id,$2) AND f.user_high_id=GREATEST(w.owner_id,$2)) \
          AND (NOT EXISTS (SELECT 1 FROM wishlist_audience a WHERE a.wishlist_id=w.id) \
@@ -195,8 +246,15 @@ async fn quote(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
     };
-    let Ok(input) = req.parse_json::<CheckoutInput>().await else {
+    let Ok(request) = req.parse_json::<CheckoutRequest>().await else {
         return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
+    };
+    let Some((inputs, expires_hours)) = request.parts() else {
+        return error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "invalid checkout items or expiry",
+        );
     };
     let coupon = match crate::benefits::coupon_id(req) {
         Ok(v) => v,
@@ -208,25 +266,34 @@ async fn quote(req: &mut Request, res: &mut Response) {
     let result = conn
         .transaction::<Option<(i64, i64, Option<serde_json::Value>)>, diesel::result::Error, _>(
             |conn| {
-                let Some(prepared) = prepare(conn, uid, &input)? else {
+                let mut prepared = Vec::with_capacity(inputs.len());
+                for input in &inputs {
+                    let Some(item) = prepare(conn, uid, input)? else {
+                        return Ok(None);
+                    };
+                    prepared.push(item);
+                }
+                let Some(subtotal) = prepared
+                    .iter()
+                    .try_fold(0_i64, |sum, item| sum.checked_add(item.price_cents))
+                else {
                     return Ok(None);
                 };
-                let (discount, _) = crate::benefits::discount(
-                    conn,
-                    uid,
-                    coupon,
-                    &[(prepared.product_id, prepared.price_cents)],
-                )?;
+                let prices: Vec<_> = prepared
+                    .iter()
+                    .map(|item| (item.product_id, item.price_cents))
+                    .collect();
+                let (discount, _) = crate::benefits::discount(conn, uid, coupon, &prices)?;
                 let warning = prepared
-                    .binding
-                    .as_ref()
-                    .filter(|b| b.changed())
-                    .map(|b| b.warning());
-                Ok(Some((prepared.price_cents, discount, warning)))
+                    .iter()
+                    .filter_map(|item| item.binding.as_ref().filter(|b| b.changed()))
+                    .map(|binding| binding.warning())
+                    .next();
+                Ok(Some((subtotal, discount, warning)))
             },
         );
     match result {
-        Ok(Some((subtotal,discount,warning)))=>res.render(Json(json!({"product_id":input.product_id,"subtotal_cents":subtotal,"discount_cents":discount,"total_cents":subtotal-discount,"recipient_warning":warning}))),
+        Ok(Some((subtotal,discount,warning)))=>res.render(Json(json!({"product_id":if inputs.len()==1 {Some(inputs[0].product_id)} else {None},"item_count":inputs.len(),"subtotal_cents":subtotal,"discount_cents":discount,"total_cents":subtotal-discount,"expires_hours":expires_hours,"recipient_warning":warning}))),
         Ok(None)=>error(res,StatusCode::CONFLICT,"product, recipient or wish unavailable"),
         Err(_)=>error(res,StatusCode::CONFLICT,"coupon unavailable"),
     }
@@ -237,8 +304,15 @@ async fn create_order(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
     };
-    let Ok(input) = req.parse_json::<CheckoutInput>().await else {
+    let Ok(request) = req.parse_json::<CheckoutRequest>().await else {
         return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
+    };
+    let Some((inputs, expires_hours)) = request.parts() else {
+        return error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "invalid checkout items or expiry",
+        );
     };
     let coupon = match crate::benefits::coupon_id(req) {
         Ok(v) => v,
@@ -260,19 +334,27 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
         if let Some(prior)=sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
             .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<OrderRow>(conn).optional()? {return Ok(Ok(Some(prior)))}
-        let Some(item)=prepare(conn,uid,&input)? else {return Ok(Ok(None))};
-        if let Some(binding)=&item.binding {
-            if binding.changed() && !input.confirm_recipient_change { return Ok(Err(binding.warning())); }
-            if !binding.changed() {
-                crate::contact_delivery::save_binding(conn,uid,item.recipient_contact.as_ref().unwrap(),binding,false)?;
+        let mut prepared=Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            let Some(item)=prepare(conn,uid,input)? else {return Ok(Ok(None))};
+            if let Some(binding)=&item.binding {
+                if binding.changed() && !input.confirm_recipient_change { return Ok(Err(binding.warning())); }
+                if !binding.changed() {
+                    crate::contact_delivery::save_binding(conn,uid,item.recipient_contact.as_ref().unwrap(),binding,false)?;
+                }
             }
+            prepared.push(item);
         }
-        let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&[(item.product_id,item.price_cents)])?;
-        let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,total_cents,status")
-            .bind::<BigInt,_>(uid).bind::<BigInt,_>(item.price_cents-discount).bind::<Text,_>(key).bind::<BigInt,_>(item.price_cents).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).get_result::<OrderRow>(conn)?;
+        let Some(subtotal)=prepared.iter().try_fold(0_i64,|sum,item|sum.checked_add(item.price_cents)) else {return Ok(Ok(None))};
+        let prices:Vec<_>=prepared.iter().map(|item|(item.product_id,item.price_cents)).collect();
+        let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&prices)?;
+        let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id,gift_expires_hours) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,total_cents,status")
+            .bind::<BigInt,_>(uid).bind::<BigInt,_>(subtotal-discount).bind::<Text,_>(key).bind::<BigInt,_>(subtotal).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).bind::<Integer,_>(expires_hours).get_result::<OrderRow>(conn)?;
         crate::benefits::reserve(conn,uid,coupon,order.id)?;
-        sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-            .bind::<BigInt,_>(order.id).bind::<Integer,_>(item.product_id).bind::<Nullable<BigInt>,_>(item.recipient_id).bind::<BigInt,_>(item.price_cents-allocated[0]).bind::<Nullable<BigInt>,_>(item.wish_item_id).bind::<Nullable<Jsonb>,_>(item.recipient_contact).bind::<Nullable<BigInt>,_>(item.binding.as_ref().and_then(|b|b.current)).bind::<Bool,_>(item.binding.as_ref().is_some_and(|b|b.changed() && input.confirm_recipient_change)).execute(conn)?;
+        for (index,item) in prepared.iter().enumerate() {
+            sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+                .bind::<BigInt,_>(order.id).bind::<Integer,_>(item.product_id).bind::<Nullable<BigInt>,_>(item.recipient_id).bind::<BigInt,_>(item.price_cents-allocated[index]).bind::<Nullable<BigInt>,_>(item.wish_item_id).bind::<Nullable<Jsonb>,_>(&item.recipient_contact).bind::<Nullable<BigInt>,_>(item.binding.as_ref().and_then(|b|b.current)).bind::<Bool,_>(item.binding.as_ref().is_some_and(|b|b.changed() && inputs[index].confirm_recipient_change)).execute(conn)?;
+        }
         Ok(Ok(Some(order)))
     });
     match result {
@@ -369,6 +451,8 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
             .bind::<BigInt,_>(oid).bind::<BigInt,_>(uid).get_result(conn)?;
         if order.status == "paid_test" { return Ok(Ok(order)); }
         if order.status != "pending" { return Err(diesel::result::Error::RollbackTransaction); }
+        let expiry: ExpiryHoursRow = sql_query("SELECT gift_expires_hours FROM orders WHERE id=$1")
+            .bind::<BigInt,_>(oid).get_result(conn)?;
         let items: Vec<OrderItemRow> = sql_query("SELECT id,product_id,recipient_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed,price_cents,gift_id,wish_item_id FROM order_items WHERE order_id=$1 ORDER BY id")
             .bind::<BigInt,_>(oid).load(conn)?;
         for item in &items {
@@ -402,9 +486,9 @@ async fn pay_test(req: &mut Request, res: &mut Response) {
                     return Err(diesel::result::Error::RollbackTransaction);
                 }
             }
-            let gift: IdRow = sql_query("INSERT INTO gifts (sender_id,recipient_id,product_id,price_cents,state,recipient_contact) VALUES ($1,$2,$3,$4,'sealed',$5) RETURNING id")
+            let gift: IdRow = sql_query("INSERT INTO gifts (sender_id,recipient_id,product_id,price_cents,state,recipient_contact,expires_at) VALUES ($1,$2,$3,$4,'sealed',$5,now()+$6*interval '1 hour') RETURNING id")
                 .bind::<BigInt,_>(uid).bind::<Nullable<BigInt>,_>(recipient_id)
-                .bind::<Integer,_>(item.product_id).bind::<BigInt,_>(item.price_cents).bind::<Nullable<Jsonb>,_>(&item.recipient_contact).get_result(conn)?;
+                .bind::<Integer,_>(item.product_id).bind::<BigInt,_>(item.price_cents).bind::<Nullable<Jsonb>,_>(&item.recipient_contact).bind::<Integer,_>(expiry.gift_expires_hours).get_result(conn)?;
             crate::contact_delivery::gift_delivery(conn,gift.id,recipient_id,item.recipient_contact.as_ref())?;
             sql_query("UPDATE order_items SET gift_id=$1 WHERE id=$2")
                 .bind::<BigInt,_>(gift.id).bind::<BigInt,_>(item.id).execute(conn)?;
@@ -449,6 +533,46 @@ pub fn routes() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_accepts_distinct_batch_recipients_and_legacy_single_item() {
+        let batch: CheckoutRequest = serde_json::from_value(json!({"items":[
+            {"product_id":1,"recipient_id":10},
+            {"product_id":1,"recipient_id":11}
+        ]}))
+        .unwrap();
+        assert_eq!(batch.parts().unwrap().0.len(), 2);
+        let single: CheckoutRequest = serde_json::from_value(json!({
+            "product_id":1,"recipient_id":10
+        }))
+        .unwrap();
+        assert_eq!(single.parts().unwrap().1, 24);
+        let custom_single: CheckoutRequest = serde_json::from_value(json!({
+            "product_id":1,"recipient_id":10,"expires_hours":48
+        }))
+        .unwrap();
+        assert_eq!(custom_single.parts().unwrap().1, 48);
+        let duplicate: CheckoutRequest = serde_json::from_value(json!({"items":[
+            {"product_id":1,"recipient_id":10},
+            {"product_id":1,"recipient_id":10}
+        ]}))
+        .unwrap();
+        assert!(duplicate.parts().is_none());
+        let empty: CheckoutRequest = serde_json::from_value(json!({"items":[]})).unwrap();
+        assert!(empty.parts().is_none());
+        for hours in [0, 721] {
+            let request: CheckoutRequest = serde_json::from_value(
+                json!({"items":[{"product_id":1,"recipient_id":10}],"expires_hours":hours}),
+            )
+            .unwrap();
+            assert!(request.parts().is_none());
+        }
+        let custom: CheckoutRequest = serde_json::from_value(
+            json!({"items":[{"product_id":1,"recipient_id":10}],"expires_hours":36}),
+        )
+        .unwrap();
+        assert_eq!(custom.parts().unwrap().1, 36);
+    }
 
     #[test]
     fn wish_claim_requires_owner_friend_visibility_and_matching_product() {

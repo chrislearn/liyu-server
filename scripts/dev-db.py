@@ -1,9 +1,60 @@
 """Manage only the local liyu_dev database; configuration comes from just's dotenv."""
 
 import os
+import re
+import shutil
+import socket
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+
+def postgres_data_dir():
+    if os.environ.get("PGDATA"):
+        return Path(os.environ["PGDATA"]).expanduser()
+    if sys.platform != "darwin" or not shutil.which("brew"):
+        return None
+    try:
+        prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+        version = subprocess.check_output(["pg_ctl", "--version"], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"PostgreSQL\) (\d+)", version)
+    if not match:
+        return None
+    data_dir = Path(prefix) / "var" / f"postgresql@{match.group(1)}"
+    return data_dir if (data_dir / "PG_VERSION").is_file() else None
+
+
+def start_postgres_if_needed(url):
+    port = url.port or 5432
+    if socket_is_listening(url.hostname, port):
+        return
+
+    data_dir = postgres_data_dir()
+    if not shutil.which("pg_ctl") or not data_dir or not (data_dir / "PG_VERSION").is_file():
+        sys.exit(
+            f"No PostgreSQL is listening on {url.hostname}:{port}. Start it, or set PGDATA "
+            "to an existing local PostgreSQL data directory before running just dev."
+        )
+    result = subprocess.run(
+        ["pg_ctl", "-D", str(data_dir), "-o", f"-p {port}",
+         "-l", str(data_dir / "liyu-dev-postgres.log"), "-w", "start"],
+        capture_output=True, text=True,
+    )
+    if result.returncode and not socket_is_listening(url.hostname, port):
+        detail = result.stderr.strip() or result.stdout.strip()
+        sys.exit(f"Could not start PostgreSQL on port {port}:\n{detail}")
+    print(f"PostgreSQL ready on {url.hostname}:{port}")
+
+
+def socket_is_listening(host, port):
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 def main():
@@ -23,6 +74,9 @@ def main():
     admin_url = urlunsplit(url._replace(path="/postgres"))
     env = os.environ.copy()
     env["PGCONNECT_TIMEOUT"] = "5"
+
+    if mode == "ensure":
+        start_postgres_if_needed(url)
 
     def sql(statement):
         return subprocess.run(

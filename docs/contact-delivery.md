@@ -16,7 +16,7 @@
 - `DELETE /api/v1/me/contact-identities`：带 Bearer token，`{"kind":"email","value":"…"}`，释放本人已验证的联系方式；更换手机号/邮箱后旧值必须显式释放，才可由另一用户验证。已领取礼物不会转移。
 - `POST /api/v1/contacts`：保存送礼人的联系人，格式 `{"label":"朋友","phones":["13800138000"],"emails":["a@example.com","b@example.com"]}`；`GET /api/v1/contacts` 列出本人有效联系人的名称和联系方式。内部绑定的用户 ID 不向客户端返回。一个联系人内已匹配的联系方式必须属于同一个用户。
 - `POST /api/v1/contacts/avatars`：带 Bearer token，提交 `{"contacts":[{"kind":"email","value":"a@example.com"}]}`，一次 1–32 个已规范化联系方式。返回 `{"avatars":[{"kind":"email","value":"a@example.com","avatar_url":"/api/v1/media/avatars/…"}]}`。只返回联系方式已验证且账号仍有效的用户主动上传的头像；未知地址、未上传头像以及服务器默认头像都省略。
-- `POST /api/v1/orders/quote` 与 `POST /api/v1/orders`：`{"product_id":0,"recipient":{"kind":"phone","value":"13800138000","label":"朋友"}}`。单件礼物直接报价及下单；一次只支持一个联系方式。也接受已有用户的 `recipient_id`，两种形式不可同时提供。下单须带 `Idempotency-Key`，测试支付仍调用 `/api/v1/orders/{id}/pay-test`。购物车路由已移除。
+- `POST /api/v1/orders/quote` 与 `POST /api/v1/orders`：`{"product_id":0,"recipient":{"kind":"phone","value":"13800138000","label":"朋友"}}`。旧格式直接为单件礼物报价及下单；`{"items":[{"product_id":0,"recipient_id":12},{"product_id":0,"recipient_id":13}]}` 可将 1–100 位不同收礼人的礼物合并成一笔订单。每件礼物仍可使用一个联系方式或已有用户的 `recipient_id`，两种形式不可同时提供。下单须带 `Idempotency-Key`，测试支付仍调用 `/api/v1/orders/{id}/pay-test`。购物车路由已移除。
 - 当所选联系方式当前匹配的用户 ID 与保存的联系人 ID 不同（包括当前无人持有）时，报价返回 `recipient_warning`，下单和测试支付返回 HTTP 409、`code: "recipient_identity_changed"`。用户确认风险后，下单请求设置 `confirm_recipient_change: true`；若变化发生在下单后、测试支付前，则支付请求设置 `X-Confirm-Recipient-Change: true`。已确认的订单在支付时重新核对目标，确认目标未再次变化才送出；旧联系人过期和新联系人建立与支付同事务完成。多联系方式联系人中未变更的地址保留在另一个新联系人条目。
 - `GET /api/v1/notifications`、`POST /api/v1/notifications/{id}/read`：只允许本人读取／标记通知。
 - `GET /gift-invitations/{token}`：注册、登录及验证领取页面，不泄露礼物内容或发送方身份。
