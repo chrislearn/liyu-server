@@ -4,11 +4,11 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 use salvo::prelude::*;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{error, pool, user_id};
 
-const FRIEND_VISIBLE: &str = "EXISTS (SELECT 1 FROM friendships f WHERE f.status = 'accepted' \
+const FRIEND_VISIBLE: &str = "w.published_at IS NOT NULL AND EXISTS (SELECT 1 FROM friendships f WHERE f.status = 'accepted' \
     AND f.user_low_id = LEAST(w.owner_id, $2) AND f.user_high_id = GREATEST(w.owner_id, $2)) \
     AND (NOT EXISTS (SELECT 1 FROM wishlist_audience a WHERE a.wishlist_id = w.id) \
     OR EXISTS (SELECT 1 FROM wishlist_audience a WHERE a.wishlist_id = w.id AND a.user_id = $2))";
@@ -35,6 +35,15 @@ struct WishlistInput {
     items: Vec<WishItemInput>,
     audience_user_ids: Option<Vec<i64>>,
     expires_hours: Option<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WishlistDraftInput {
+    title: String,
+    note: Option<String>,
+    #[serde(default)]
+    items: Vec<WishItemInput>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +87,8 @@ struct FriendRow {
     #[diesel(sql_type = Text)]
     birthday: String,
     #[diesel(sql_type = Text)]
+    wedding_date: String,
+    #[diesel(sql_type = Text)]
     note: String,
 }
 
@@ -88,7 +99,48 @@ struct FriendDetailsInput {
     email: String,
     relationship: String,
     birthday: String,
+    #[serde(default)]
+    wedding_date: String,
     note: String,
+}
+
+fn valid_occasion_date(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    {
+        return false;
+    }
+    let year: u32 = value[0..4].parse().unwrap_or(0);
+    let month: usize = value[5..7].parse().unwrap_or(0);
+    let day: u32 = value[8..10].parse().unwrap_or(0);
+    if !(1900..=2100).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    day >= 1 && day <= days[month - 1]
 }
 
 fn valid_friend_details(d: &FriendDetailsInput) -> bool {
@@ -98,6 +150,7 @@ fn valid_friend_details(d: &FriendDetailsInput) -> bool {
         (&d.email, 254),
         (&d.relationship, 100),
         (&d.birthday, 40),
+        (&d.wedding_date, 40),
         (&d.note, 500),
     ]
     .into_iter()
@@ -106,6 +159,8 @@ fn valid_friend_details(d: &FriendDetailsInput) -> bool {
             || crate::contact_delivery::normalize("phone", &d.phone).is_some())
         && (d.email.trim().is_empty()
             || crate::contact_delivery::normalize("email", &d.email).is_some())
+        && valid_occasion_date(d.birthday.trim())
+        && valid_occasion_date(d.wedding_date.trim())
 }
 
 #[derive(QueryableByName)]
@@ -126,6 +181,10 @@ struct WishlistRow {
     event_on: String,
     #[diesel(sql_type = Bool)]
     is_open: bool,
+    #[diesel(sql_type = Text)]
+    status: String,
+    #[diesel(sql_type = BigInt)]
+    item_count: i64,
     #[diesel(sql_type = BigInt)]
     expires_at: i64,
 }
@@ -209,6 +268,8 @@ fn summary(row: WishlistRow) -> Value {
         "occasion": row.occasion,
         "event_on": row.event_on,
         "is_open": row.is_open,
+        "status": row.status,
+        "item_count": row.item_count,
         "expires_at": row.expires_at,
     })
 }
@@ -300,6 +361,7 @@ async fn friends(req: &mut Request, res: &mut Response) {
          u.display_name AS account_name,COALESCE(d.nickname,'') AS nickname, \
          COALESCE(d.phone,'') AS phone,COALESCE(d.email,'') AS email, \
          COALESCE(d.relationship,'') AS relationship,COALESCE(d.birthday,'') AS birthday, \
+         COALESCE(d.wedding_date,'') AS wedding_date, \
          COALESCE(d.note,'') AS note FROM friendships f JOIN users u ON \
          u.id=CASE WHEN f.user_low_id=$1 THEN f.user_high_id ELSE f.user_low_id END \
          LEFT JOIN friend_details d ON d.owner_id=$1 AND d.friend_id=u.id \
@@ -313,7 +375,7 @@ async fn friends(req: &mut Request, res: &mut Response) {
             rows.into_iter()
                 .map(|r| json!({"id":r.id,"display_name":r.display_name,"account_name":r.account_name,
                     "nickname":r.nickname,"phone":r.phone,"email":r.email,"relationship":r.relationship,
-                    "birthday":r.birthday,"note":r.note}))
+                    "birthday":r.birthday,"wedding_date":r.wedding_date,"note":r.note}))
                 .collect::<Vec<_>>(),
         )),
         Err(_) => error(
@@ -340,13 +402,14 @@ async fn put_friend_details(req: &mut Request, res: &mut Response) {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
     let changed = diesel::sql_query(
-        "INSERT INTO friend_details(owner_id,friend_id,nickname,phone,email,relationship,birthday,note) \
-         SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS ( \
+        "INSERT INTO friend_details(owner_id,friend_id,nickname,phone,email,relationship,birthday,wedding_date,note) \
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS ( \
            SELECT 1 FROM friendships f WHERE f.status='accepted' \
            AND f.user_low_id=LEAST($1,$2) AND f.user_high_id=GREATEST($1,$2)) \
          ON CONFLICT(owner_id,friend_id) DO UPDATE SET \
            nickname=excluded.nickname,phone=excluded.phone,email=excluded.email, \
-           relationship=excluded.relationship,birthday=excluded.birthday,note=excluded.note,updated_at=now()",
+           relationship=excluded.relationship,birthday=excluded.birthday, \
+           wedding_date=excluded.wedding_date,note=excluded.note,updated_at=now()",
     )
     .bind::<BigInt, _>(uid)
     .bind::<BigInt, _>(friend_id)
@@ -355,6 +418,7 @@ async fn put_friend_details(req: &mut Request, res: &mut Response) {
     .bind::<Text, _>(input.email.trim())
     .bind::<Text, _>(input.relationship.trim())
     .bind::<Text, _>(input.birthday.trim())
+    .bind::<Text, _>(input.wedding_date.trim())
     .bind::<Text, _>(input.note.trim())
     .execute(&mut conn);
     match changed {
@@ -443,7 +507,10 @@ async fn my_wishlists(req: &mut Request, res: &mut Response) {
     let rows = diesel::sql_query(
         "SELECT w.id,w.owner_id,u.display_name AS owner_name,w.title,w.note,w.occasion, \
          w.event_on::text AS event_on, extract(epoch from w.expires_at)::bigint AS expires_at, \
-         (w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open \
+         (w.published_at IS NOT NULL AND w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open, \
+         CASE WHEN w.closed_at IS NOT NULL THEN 'closed' WHEN w.published_at IS NULL THEN 'draft' \
+         WHEN w.expires_at<=now() OR w.event_on<CURRENT_DATE-7 THEN 'expired' ELSE 'published' END AS status, \
+         (SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id) AS item_count \
          FROM wishlists w JOIN users u ON u.id=w.owner_id \
          WHERE w.owner_id=$1 ORDER BY w.event_on DESC,w.id DESC",
     )
@@ -468,7 +535,10 @@ async fn friend_wishlists(req: &mut Request, res: &mut Response) {
     let query = format!(
         "SELECT w.id,w.owner_id,u.display_name AS owner_name,w.title,w.note,w.occasion, \
          w.event_on::text AS event_on, extract(epoch from w.expires_at)::bigint AS expires_at, \
-         (w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open \
+         (w.published_at IS NOT NULL AND w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open, \
+         CASE WHEN w.closed_at IS NOT NULL THEN 'closed' WHEN w.published_at IS NULL THEN 'draft' \
+         WHEN w.expires_at<=now() OR w.event_on<CURRENT_DATE-7 THEN 'expired' ELSE 'published' END AS status, \
+         (SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id) AS item_count \
          FROM wishlists w JOIN users u ON u.id=w.owner_id \
          WHERE w.owner_id<>$1 AND {} ORDER BY w.event_on,w.id",
         FRIEND_VISIBLE.replace("$2", "$1")
@@ -498,7 +568,10 @@ async fn get_wishlist(req: &mut Request, res: &mut Response) {
     let query = format!(
         "SELECT w.id,w.owner_id,u.display_name AS owner_name,w.title,w.note,w.occasion, \
          w.event_on::text AS event_on, extract(epoch from w.expires_at)::bigint AS expires_at, \
-         (w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open \
+         (w.published_at IS NOT NULL AND w.closed_at IS NULL AND w.expires_at>now() AND w.event_on >= CURRENT_DATE - 7) AS is_open, \
+         CASE WHEN w.closed_at IS NOT NULL THEN 'closed' WHEN w.published_at IS NULL THEN 'draft' \
+         WHEN w.expires_at<=now() OR w.event_on<CURRENT_DATE-7 THEN 'expired' ELSE 'published' END AS status, \
+         (SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id) AS item_count \
          FROM wishlists w JOIN users u ON u.id=w.owner_id \
          WHERE w.id=$1 AND (w.owner_id=$2 OR ({}))",
         FRIEND_VISIBLE
@@ -516,7 +589,7 @@ async fn get_wishlist(req: &mut Request, res: &mut Response) {
                 res,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "wishlist query failed",
-            )
+            );
         }
     };
     let is_owner = row.owner_id == uid;
@@ -536,7 +609,7 @@ async fn get_wishlist(req: &mut Request, res: &mut Response) {
                 res,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "wishlist items query failed",
-            )
+            );
         }
     };
     let mut output = summary(row);
@@ -562,11 +635,103 @@ async fn get_wishlist(req: &mut Request, res: &mut Response) {
                     res,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "wishlist audience query failed",
-                )
+                );
             }
         }
     }
     res.render(Json(output));
+}
+
+fn active_product(conn: &mut PgConnection, pid: i32) -> QueryResult<bool> {
+    diesel::sql_query("SELECT count(*) AS count FROM catalog WHERE id=$1 AND is_active")
+        .bind::<Integer, _>(pid)
+        .get_result::<CountRow>(conn)
+        .map(|r| r.count == 1)
+}
+
+#[handler]
+async fn create_draft(req: &mut Request, res: &mut Response) {
+    let Some(uid) = user(req, res) else { return };
+    let Ok(body) = req.parse_json::<WishlistDraftInput>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid JSON");
+    };
+    let note = body.note.as_deref().unwrap_or("").trim();
+    let mut seen = std::collections::HashSet::new();
+    if body.title.trim().is_empty()
+        || body.title.trim().chars().count() > 16
+        || note.chars().count() > 40
+        || body.items.len() > 8
+        || !body
+            .items
+            .iter()
+            .all(|item| valid_item(item) && item.product_id.is_none_or(|pid| seen.insert(pid)))
+    {
+        return error(res, StatusCode::BAD_REQUEST, "invalid wishlist draft");
+    }
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let result=conn.transaction::<Option<i64>,diesel::result::Error,_>(|conn| {
+        for item in &body.items { if let Some(pid)=item.product_id { if !active_product(conn,pid)? { return Ok(None) } } }
+        let id=diesel::sql_query("INSERT INTO wishlists(owner_id,title,note,event_on,expires_at,published_at) VALUES($1,$2,$3,CURRENT_DATE,now()+interval '24 hours',NULL) RETURNING id")
+            .bind::<BigInt,_>(uid).bind::<Text,_>(body.title.trim()).bind::<Text,_>(note).get_result::<IdRow>(conn)?.id;
+        for (ordinal,item) in body.items.iter().enumerate() { insert_item(conn,id,ordinal as i32,item)?; }
+        Ok(Some(id))
+    });
+    match result {
+        Ok(Some(id)) => res.render(Json(json!({"id":id,"status":"draft"}))),
+        Ok(None) => error(res, StatusCode::BAD_REQUEST, "product unavailable"),
+        Err(_) => error(res, StatusCode::BAD_REQUEST, "draft create failed"),
+    }
+}
+
+#[handler]
+async fn publish_draft(req: &mut Request, res: &mut Response) {
+    let Some(uid) = user(req, res) else { return };
+    let Some(wid) = path_id(req, "id", res) else {
+        return;
+    };
+    let Ok(body) = req.parse_json::<WishlistEdit>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid JSON");
+    };
+    let note = body.note.as_deref().unwrap_or("").trim();
+    let occasion = body.occasion.as_deref().unwrap_or("other").trim();
+    let hours = body.expires_hours.unwrap_or(24);
+    if !valid_header(&body.title, note, occasion, &body.event_on) || !valid_expiry(hours) {
+        return error(res, StatusCode::BAD_REQUEST, "invalid wishlist");
+    }
+    let Ok(mut conn) = pool().get() else {
+        return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
+    };
+    let result=conn.transaction::<Option<&'static str>,diesel::result::Error,_>(|conn| {
+        let owned=diesel::sql_query("SELECT id FROM wishlists WHERE id=$1 AND owner_id=$2 FOR UPDATE")
+            .bind::<BigInt,_>(wid).bind::<BigInt,_>(uid).get_result::<IdRow>(conn).optional()?;
+        if owned.is_none() { return Ok(None) }
+        let published=diesel::sql_query("SELECT count(*) AS count FROM wishlists WHERE id=$1 AND published_at IS NOT NULL AND closed_at IS NULL")
+            .bind::<BigInt,_>(wid).get_result::<CountRow>(conn)?.count;
+        if published==1 { return Ok(Some("published")) }
+        let available=diesel::sql_query("SELECT count(*) AS count FROM wishlists w WHERE w.id=$1 AND w.closed_at IS NULL AND $2::date BETWEEN CURRENT_DATE AND CURRENT_DATE+180 AND (SELECT count(*) FROM wishlist_items i WHERE i.wishlist_id=w.id) BETWEEN 1 AND 8 AND NOT EXISTS (SELECT 1 FROM wishlist_items i JOIN catalog c ON c.id=i.product_id WHERE i.wishlist_id=w.id AND NOT c.is_active)")
+            .bind::<BigInt,_>(wid).bind::<Text,_>(&body.event_on).get_result::<CountRow>(conn)?.count;
+        let audience = if let Some(audience) = &body.audience_user_ids { audience.clone() } else {
+            diesel::sql_query("SELECT user_id AS id FROM wishlist_audience WHERE wishlist_id=$1 ORDER BY user_id")
+                .bind::<BigInt,_>(wid).load::<IdRow>(conn)?.into_iter().map(|r|r.id).collect()
+        };
+        if available!=1 || !validate_audience(conn,uid,&audience)? { return Ok(Some("invalid")) }
+        diesel::sql_query("UPDATE wishlists SET title=$2,note=$3,occasion=$4,event_on=$5::date,expires_at=now()+$6*interval '1 hour',published_at=now() WHERE id=$1")
+            .bind::<BigInt,_>(wid).bind::<Text,_>(body.title.trim()).bind::<Text,_>(note).bind::<Text,_>(occasion).bind::<Text,_>(&body.event_on).bind::<Integer,_>(hours).execute(conn)?;
+        replace_audience(conn,wid,&audience)?;
+        Ok(Some("published"))
+    });
+    match result {
+        Ok(Some("published")) => res.render(Json(json!({"id":wid,"status":"published"}))),
+        Ok(None) => error(res, StatusCode::NOT_FOUND, "wishlist not found"),
+        Ok(Some(_)) => error(
+            res,
+            StatusCode::CONFLICT,
+            "empty draft, invalid date/audience, or unavailable product",
+        ),
+        Err(_) => error(res, StatusCode::BAD_REQUEST, "wishlist publish failed"),
+    }
 }
 
 #[handler]
@@ -651,8 +816,8 @@ async fn edit_wishlist(req: &mut Request, res: &mut Response) {
         let updated = diesel::sql_query(
             "UPDATE wishlists SET title=$3,note=$4,occasion=$5,event_on=$6::date, \
              expires_at=CASE WHEN $7::integer IS NULL THEN expires_at ELSE now()+$7*interval '1 hour' END \
-             WHERE id=$1 AND owner_id=$2 AND closed_at IS NULL AND expires_at>now() \
-             AND event_on >= CURRENT_DATE-7 \
+             WHERE id=$1 AND owner_id=$2 AND closed_at IS NULL \
+             AND (published_at IS NULL OR (expires_at>now() AND event_on >= CURRENT_DATE-7)) \
              AND $6::date BETWEEN CURRENT_DATE AND CURRENT_DATE+180",
         )
         .bind::<BigInt, _>(wid)
@@ -693,7 +858,7 @@ async fn close_wishlist(req: &mut Request, res: &mut Response) {
     };
     let row = diesel::sql_query(
         "UPDATE wishlists SET closed_at=COALESCE(closed_at,now()) \
-         WHERE id=$1 AND owner_id=$2 RETURNING id",
+         WHERE id=$1 AND owner_id=$2 AND published_at IS NOT NULL RETURNING id",
     )
     .bind::<BigInt, _>(wid)
     .bind::<BigInt, _>(uid)
@@ -764,16 +929,22 @@ async fn add_item(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result = conn.transaction::<Option<i64>, diesel::result::Error, _>(|conn| {
+    let result = conn.transaction::<Option<(i64,bool)>, diesel::result::Error, _>(|conn| {
         let owned = diesel::sql_query(
             "SELECT id FROM wishlists WHERE id=$1 AND owner_id=$2 AND closed_at IS NULL \
-             AND event_on >= CURRENT_DATE-7 AND expires_at>now() FOR UPDATE",
+             AND published_at IS NULL FOR UPDATE",
         )
         .bind::<BigInt, _>(wid)
         .bind::<BigInt, _>(uid)
         .get_result::<IdRow>(conn)
         .optional()?;
         if owned.is_none() { return Ok(None) }
+        if let Some(pid) = body.product_id {
+            if !active_product(conn, pid)? { return Ok(None) }
+            let existing = diesel::sql_query("SELECT id FROM wishlist_items WHERE wishlist_id=$1 AND product_id=$2")
+                .bind::<BigInt,_>(wid).bind::<Integer,_>(pid).get_result::<IdRow>(conn).optional()?;
+            if let Some(existing) = existing { return Ok(Some((existing.id,true))) }
+        }
         let count = diesel::sql_query("SELECT count(*) AS count FROM wishlist_items WHERE wishlist_id=$1")
             .bind::<BigInt, _>(wid)
             .get_result::<CountRow>(conn)?.count;
@@ -781,11 +952,17 @@ async fn add_item(req: &mut Request, res: &mut Response) {
         let ordinal = diesel::sql_query("SELECT (COALESCE(max(ordinal),-1)+1)::bigint AS count FROM wishlist_items WHERE wishlist_id=$1")
             .bind::<BigInt, _>(wid)
             .get_result::<CountRow>(conn)?.count;
-        insert_item(conn, wid, ordinal as i32, &body).map(Some)
+        insert_item(conn, wid, ordinal as i32, &body).map(|id| Some((id,false)))
     });
     match result {
-        Ok(Some(id)) => res.render(Json(json!({"id":id}))),
-        Ok(None) => error(res, StatusCode::CONFLICT, "wishlist closed or full"),
+        Ok(Some((id, already_present))) => {
+            res.render(Json(json!({"id":id,"already_present":already_present})))
+        }
+        Ok(None) => error(
+            res,
+            StatusCode::CONFLICT,
+            "draft unavailable, product inactive, or wishlist full",
+        ),
         Err(_) => error(res, StatusCode::BAD_REQUEST, "wish item create failed"),
     }
 }
@@ -802,16 +979,13 @@ async fn delete_item(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let deleted = diesel::sql_query(
-        "DELETE FROM wishlist_items i USING wishlists w WHERE i.id=$1 AND i.wishlist_id=$2 \
-         AND w.id=i.wishlist_id AND w.owner_id=$3 AND w.closed_at IS NULL \
-         AND w.event_on >= CURRENT_DATE-7 AND w.expires_at>now() AND i.claimed_gift_id IS NULL \
-         AND (SELECT count(*) FROM wishlist_items WHERE wishlist_id=$2)>1",
-    )
-    .bind::<BigInt, _>(iid)
-    .bind::<BigInt, _>(wid)
-    .bind::<BigInt, _>(uid)
-    .execute(&mut conn);
+    let deleted = conn.transaction::<usize,diesel::result::Error,_>(|conn| {
+        let owned = diesel::sql_query("SELECT id FROM wishlists WHERE id=$1 AND owner_id=$2 AND closed_at IS NULL AND published_at IS NULL FOR UPDATE")
+            .bind::<BigInt,_>(wid).bind::<BigInt,_>(uid).get_result::<IdRow>(conn).optional()?;
+        if owned.is_none() { return Ok(0) }
+        diesel::sql_query("DELETE FROM wishlist_items WHERE id=$1 AND wishlist_id=$2 AND claimed_gift_id IS NULL")
+            .bind::<BigInt,_>(iid).bind::<BigInt,_>(wid).execute(conn)
+    });
     match deleted {
         Ok(1) => {
             res.status_code(StatusCode::NO_CONTENT);
@@ -819,7 +993,7 @@ async fn delete_item(req: &mut Request, res: &mut Response) {
         Ok(_) => error(
             res,
             StatusCode::CONFLICT,
-            "item unavailable, claimed, or last item",
+            "draft item unavailable or claimed",
         ),
         Err(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::ForeignKeyViolation,
@@ -842,6 +1016,8 @@ pub fn routes() -> Router {
         .push(Router::with_path("api/v1/wishlists/mine").get(my_wishlists))
         .push(Router::with_path("api/v1/wishlists/friends").get(friend_wishlists))
         .push(Router::with_path("api/v1/wishlists").post(create_wishlist))
+        .push(Router::with_path("api/v1/wishlists/drafts").post(create_draft))
+        .push(Router::with_path("api/v1/wishlists/{id}/publish").post(publish_draft))
         .push(
             Router::with_path("api/v1/wishlists/{id}")
                 .get(get_wishlist)
@@ -856,6 +1032,15 @@ pub fn routes() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occasion_dates_accept_leap_days_and_reject_invalid_calendar_dates() {
+        assert!(valid_occasion_date(""));
+        assert!(valid_occasion_date("2000-02-29"));
+        assert!(!valid_occasion_date("1900-02-29"));
+        assert!(!valid_occasion_date("2026-09-31"));
+        assert!(!valid_occasion_date("2026/09/30"));
+    }
 
     #[test]
     fn privacy_projection_for_owner_friend_and_other() {

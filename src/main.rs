@@ -6,9 +6,11 @@ mod commerce;
 mod config;
 mod contact_delivery;
 mod demo_logistics;
+mod friend_tags;
 mod fulfillment;
 mod gifting;
 mod management;
+mod occasion_reminders;
 mod profile;
 mod schema;
 mod wishlist;
@@ -426,6 +428,8 @@ async fn main() {
         .unwrap_or_else(|_| panic!("database already initialized"));
     contact_delivery::validate_config().expect("valid contact delivery configuration");
     contact_delivery::start_worker();
+    fulfillment::start_auto_confirm_worker();
+    occasion_reminders::start_worker();
     let router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(admin::routes())
@@ -442,6 +446,7 @@ async fn main() {
         .push(commerce::routes())
         .push(catalog::routes())
         .push(wishlist::routes())
+        .push(friend_tags::routes())
         .push(gifting::routes())
         .push(demo_logistics::routes())
         .push(Router::with_path("api/v1/me").get(me))

@@ -162,7 +162,7 @@ fn valid_wish_claim(
     let lock_clause = if lock { " FOR UPDATE OF wi,w" } else { "" };
     let sql = format!("SELECT w.owner_id,wi.product_id AS exact_product_id,wi.kind, \
         c.kind AS selected_kind,(wi.claimed_gift_id IS NOT NULL) AS claimed, \
-        (w.closed_at IS NULL AND w.expires_at>now() AND w.event_on>=CURRENT_DATE-7) AS is_open, \
+        (w.published_at IS NOT NULL AND w.closed_at IS NULL AND w.expires_at>now() AND w.event_on>=CURRENT_DATE-7) AS is_open, \
         (EXISTS (SELECT 1 FROM friendships f WHERE f.status='accepted' \
             AND f.user_low_id=LEAST(w.owner_id,$2) AND f.user_high_id=GREATEST(w.owner_id,$2)) \
          AND (NOT EXISTS (SELECT 1 FROM wishlist_audience a WHERE a.wishlist_id=w.id) \

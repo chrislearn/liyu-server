@@ -101,6 +101,7 @@ call(f'/admin/api/manage/cancel-order/{order["id"]}','POST',{'reason':'paid canc
 gift=call(f'/api/v1/orders/{order["id"]}',token=token)['items'][0]['gift_id']
 assert next(r for r in report('gifts') if r['id']==gift)['price_cents']==10000
 manage('recycle',pid,is_active=True,mode='percentage',value=9000,expires_at=None)
+call(f'/api/v1/gifts/{gift}/puzzle','PUT',{'unlock_kind':'free'},token=token)
 call(f'/api/v1/gifts/{gift}/open','POST',token=recipient)
 assert call(f'/api/v1/gifts/{gift}/recovery-quote',token=recipient)['recovery_cents']==9000
 call(f'/api/v1/gifts/{gift}/cash-out','POST',token=other,status=401) # disabled token
@@ -173,6 +174,7 @@ assert next(r for r in report('issued-coupons') if r['id']==cancel_coupon)['stat
 exchange_order=user_order('/api/v1/orders',key=str(uuid.uuid4()))
 user_order(f"/api/v1/orders/{exchange_order['id']}/pay-test")
 exchange_gift=call(f"/api/v1/orders/{exchange_order['id']}",token=token)['items'][0]['gift_id']
+call(f'/api/v1/gifts/{exchange_gift}/puzzle','PUT',{'unlock_kind':'free'},token=token)
 call(f'/api/v1/gifts/{exchange_gift}/open','POST',token=recipient)
 manage('recycle',pid,is_active=False,mode='fixed',value=999999,expires_at=None)
 call(f'/api/v1/gifts/{exchange_gift}/recovery-quote',token=recipient,status=409)
@@ -188,11 +190,13 @@ contract_order=user_order('/api/v1/orders',key=str(uuid.uuid4()))
 user_order(f"/api/v1/orders/{contract_order['id']}/pay-test")
 contract_gift=call(f"/api/v1/orders/{contract_order['id']}",token=token)['items'][0]['gift_id']
 call(f'/api/v1/gifts/{contract_gift}/puzzle','PUT',{'unlock_kind':'free','contract_text':'一起喝杯咖啡'},token=token)
-call(f'/admin/api/manage/contract/{contract_gift}','POST',{'reason':'not accepted','status':'fulfilled'},status=409)
+call(f'/admin/api/manage/contract/{contract_gift}','POST',{'reason':'personal status only','status':'fulfilled'},status=400)
 call(f'/api/v1/gifts/{contract_gift}/open','POST',token=recipient)
 call(f'/api/v1/gifts/{contract_gift}/accept','POST',{'agree':True,'recipient_name':'测试','recipient_phone':'13800138000','recipient_address':'测试地址'},token=recipient)
-manage('contract',contract_gift,status='fulfilled')
-assert next(r for r in report('contracts') if r['id']==contract_gift)['status']=='fulfilled'
+call(f'/api/v1/contracts/{contract_gift}/status','PUT',{'status':'fulfilled'},token=token)
+contract_report=next(r for r in report('contracts') if r['id']==contract_gift)
+assert contract_report['sender_status']=='fulfilled' and contract_report['recipient_status']=='pending'
+call(f'/admin/api/manage/contract/{contract_gift}','POST',{'reason':'personal status only','status':'fulfilled'},status=400)
 other=call('/api/v1/auth/login','POST',{'identifier':'chenxiao@liyu.test','password':'123456'})['token']
 manage('user-sessions',c)
 call('/api/v1/me',token=other,status=401)

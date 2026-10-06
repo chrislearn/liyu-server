@@ -80,6 +80,32 @@ fn requested_gift(req: &Request, res: &mut Response) -> Option<i64> {
     Some(id)
 }
 
+fn auto_confirm(conn: &mut PgConnection, gid: i64) -> QueryResult<()> {
+    diesel::sql_query("UPDATE shipments SET recipient_confirmed_at=delivered_at+interval '7 days' \
+        WHERE gift_id=$1 AND delivered_at<=now()-interval '7 days' AND recipient_confirmed_at IS NULL")
+        .bind::<BigInt,_>(gid).execute(conn)?;
+    Ok(())
+}
+
+pub(crate) fn start_auto_confirm_worker() {
+    tokio::spawn(async {
+        loop {
+            let db = pool().clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut conn) = db.get() {
+                    let _ = diesel::sql_query(
+                        "UPDATE shipments SET recipient_confirmed_at=delivered_at+interval '7 days' \
+                         WHERE delivered_at<=now()-interval '7 days' AND recipient_confirmed_at IS NULL",
+                    )
+                    .execute(&mut conn);
+                }
+            })
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+}
+
 fn authenticated_user(req: &Request, res: &mut Response) -> Option<i64> {
     let Some(uid) = user_id(req) else {
         error(res, StatusCode::UNAUTHORIZED, "invalid session");
@@ -100,6 +126,13 @@ async fn recipient_shipment(req: &mut Request, res: &mut Response) {
         Ok(conn) => conn,
         Err(_) => return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
     };
+    if auto_confirm(&mut conn, gid).is_err() {
+        return error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "shipment update failed",
+        );
+    }
     // The recipient predicate is in SQL, so an unrelated account cannot fetch the row.
     let detail = diesel::sql_query(
         "SELECT s.gift_id, s.carrier, s.tracking_number, s.recipient_name, \
@@ -220,6 +253,13 @@ async fn sender_delivery_status(req: &mut Request, res: &mut Response) {
         Ok(conn) => conn,
         Err(_) => return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
     };
+    if auto_confirm(&mut conn, gid).is_err() {
+        return error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "shipment update failed",
+        );
+    }
     // Select only two booleans. No address, tracking, event, or exchange data is loaded.
     let status = diesel::sql_query(
         "SELECT g.id AS gift_id, (s.delivered_at IS NOT NULL) AS carrier_delivered, \

@@ -131,7 +131,7 @@ pub(crate) fn refund(conn: &mut PgConnection, gift: i64, kind: &str) -> QueryRes
 }
 
 fn recovery_quote(conn: &mut PgConnection, uid: i64, id: i64, lock: bool) -> QueryResult<Value> {
-    let sql=format!("SELECT jsonb_build_object('id',g.id,'product_id',g.product_id,'paid_cents',g.price_cents,'state',g.state,'mode',p.mode,'value',p.value,'enabled',p.is_active AND (p.expires_at IS NULL OR p.expires_at>now())) AS data FROM gifts g LEFT JOIN recycle_policies p ON p.product_id=g.product_id WHERE g.id=$1 AND g.recipient_id=$2{}",if lock {" FOR UPDATE OF g"} else {""});
+    let sql=format!("SELECT jsonb_build_object('id',g.id,'product_id',g.product_id,'paid_cents',g.price_cents,'state',g.state,'mode',COALESCE(p.mode,'percentage'),'value',COALESCE(p.value,7000),'enabled',COALESCE(p.is_active AND (p.expires_at IS NULL OR p.expires_at>now()),true)) AS data FROM gifts g LEFT JOIN recycle_policies p ON p.product_id=g.product_id WHERE g.id=$1 AND g.recipient_id=$2{}",if lock {" FOR UPDATE OF g"} else {""});
     let row = sql_query(sql)
         .bind::<BigInt, _>(id)
         .bind::<BigInt, _>(uid)
@@ -242,7 +242,7 @@ async fn wallet(req: &mut Request, res: &mut Response) {
     let query = if req.uri().path().ends_with("/coupons") {
         "SELECT to_jsonb(r) AS data FROM (SELECT u.id,u.status,t.name,t.kind,t.discount_kind,t.value,t.min_spend_cents,t.max_discount_cents,t.product_id,t.category,t.starts_at,t.expires_at,t.is_active FROM user_coupons u JOIN coupon_templates t ON t.id=u.template_id WHERE u.user_id=$1 ORDER BY u.id DESC LIMIT 100) r"
     } else {
-        "SELECT jsonb_build_object('balance_cents',COALESCE(sum(amount_cents),0),'ledger',COALESCE((SELECT jsonb_agg(r) FROM (SELECT id,amount_cents,kind,gift_id,created_at FROM wallet_ledger WHERE user_id=$1 ORDER BY id DESC LIMIT 100) r),'[]'::jsonb)) AS data FROM wallet_ledger WHERE user_id=$1"
+        "SELECT jsonb_build_object('balance_cents',COALESCE(sum(amount_cents),0),'ledger',COALESCE((SELECT jsonb_agg(r) FROM (SELECT id,amount_cents,kind,gift_id,created_at,EXTRACT(EPOCH FROM created_at)::bigint AS created_at_epoch FROM wallet_ledger WHERE user_id=$1 ORDER BY id DESC LIMIT 100) r),'[]'::jsonb)) AS data FROM wallet_ledger WHERE user_id=$1"
     };
     match sql_query(query)
         .bind::<BigInt, _>(uid)
@@ -275,6 +275,13 @@ async fn notifications(req: &mut Request, res: &mut Response) {
     if let Some(id) = id {
         match sql_query("UPDATE notifications SET read_at=COALESCE(read_at,now()) WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>now()").bind::<BigInt,_>(id).bind::<BigInt,_>(uid).execute(&mut conn) {Ok(1)=>res.render(Json(json!({"id":id,"read":true}))),_=>error(res,StatusCode::NOT_FOUND,"notification not found")};
         return;
+    }
+    if crate::occasion_reminders::scan_for_user(&mut conn, Some(uid)).is_err() {
+        return error(
+            res,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "occasion reminders failed",
+        );
     }
     match sql_query("SELECT to_jsonb(n) AS data FROM notifications n WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY id DESC LIMIT 100").bind::<BigInt,_>(uid).load::<JsonRow>(&mut conn) {Ok(rows)=>res.render(Json(json!(rows.into_iter().map(|r|r.data).collect::<Vec<_>>()))),Err(_)=>error(res,StatusCode::INTERNAL_SERVER_ERROR,"notifications query failed")}
 }

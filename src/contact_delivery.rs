@@ -292,7 +292,7 @@ pub(crate) fn resolve(conn: &mut PgConnection, r: &Value) -> QueryResult<Option<
 }
 
 pub(crate) fn notify(conn: &mut PgConnection, gift: i64, uid: i64) -> QueryResult<()> {
-    sql_query("INSERT INTO notifications(user_id,title,body,expires_at,gift_id,event_key,type) SELECT $2,'有礼物等你拆','一份神秘礼物已经放进你的礼盒。',expires_at,id,'gift:'||id||':received','gift' FROM gifts WHERE id=$1 ON CONFLICT(event_key) DO NOTHING")
+    sql_query("INSERT INTO notifications(user_id,title,body,expires_at,gift_id,event_key,type) SELECT $2,'有礼盒等你拆','你收到一个礼盒，打开后按提示完成拆盒。',expires_at,id,'gift:'||id||':received','gift' FROM gifts WHERE id=$1 ON CONFLICT(event_key) DO NOTHING")
         .bind::<BigInt,_>(gift).bind::<BigInt,_>(uid).execute(conn)?;
     Ok(())
 }
@@ -311,7 +311,7 @@ pub(crate) fn gift_delivery(
     };
     let token = new_session_token();
     let url = std::env::var("LIYU_PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".into());
-    let payload = json!({"type":"gift_invitation","title":"有一份礼物等你领取","body":"验证此联系方式并登录礼遇后即可领取。","url":format!("{}/gift-invitations/{token}",url.trim_end_matches('/'))});
+    let payload = json!({"type":"gift_invitation","title":"有一个礼盒等你领取","body":"验证此联系方式并登录礼遇后即可领取。","url":format!("{}/gift-invitations/{token}",url.trim_end_matches('/'))});
     sql_query("UPDATE gifts SET invitation_hash=$2 WHERE id=$1")
         .bind::<BigInt, _>(gift)
         .bind::<Text, _>(hash_secret(&token))

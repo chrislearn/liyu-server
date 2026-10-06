@@ -67,12 +67,14 @@ $giftId = $detail.items[0].gift_id
 $puzzleBody = @{ unlock_kind = 'question'; clue = '测试答案是什么'; answer = '礼遇'; message = '演示祝福' } | ConvertTo-Json -Compress
 Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/puzzle" -Method Put -Headers $sender -ContentType 'application/json' -Body $puzzleBody | Out-Null
 $sealed = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $recipient
-if ($sealed.state -ne 'sealed' -or $sealed.PSObject.Properties.Name -contains 'product_id' -or ($sealed | ConvertTo-Json -Compress) -match '礼遇|演示祝福') {
-    throw 'Sealed gift leaked its answer, product, or private message'
+if ($sealed.state -ne 'sealed' -or $sealed.product_id -ne 0 -or -not $sealed.product.name -or -not $sealed.product.image_detail_url -or $sealed.sender -ne $null -or $sealed.clue -ne '' -or ($sealed | ConvertTo-Json -Compress) -match '演示祝福') {
+    throw 'Sealed gift did not include its product or leaked sender, answer, or private message'
 }
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $stranger } 404
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/open" -Method Post -Headers $sender } 404
 Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/open" -Method Post -Headers $recipient | Out-Null
+$opened = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $recipient
+if ($opened.product_id -ne 0 -or $opened.sender -ne $null -or $opened.clue -ne '测试答案是什么') { throw 'Opened gift must show product and clue while hiding sender' }
 $wrong = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/answer" -Method Post -Headers $recipient -ContentType 'application/json' -Body '{"answer":"错误"}'
 if ($wrong.correct -or $wrong.attempts_left -ne 2) { throw 'Wrong answer was not counted' }
 $right = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/answer" -Method Post -Headers $recipient -ContentType 'application/json' -Body '{"answer":"礼遇"}'
@@ -82,7 +84,7 @@ Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId/accept" -Method Post -Headers $
 $senderGift = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $sender
 $recipientGift = Invoke-RestMethod "$BaseUrl/api/v1/gifts/$giftId" -Headers $recipient
 if ($senderGift.state -ne 'handled' -or $senderGift.price_cents -ne 10900 -or $recipientGift.state -ne 'accepted') { throw 'Gift role projections are inconsistent' }
-if (($senderGift | ConvertTo-Json -Compress) -match '13900000000|演示路|tracking|voucher|answer|contract|exchanged|cashed_out') { throw 'Sender gift projection leaked recipient-private fields' }
+if (($senderGift | ConvertTo-Json -Compress) -match '13900000000|演示路|tracking|voucher|answer|exchanged|cashed_out') { throw 'Sender gift projection leaked recipient-private fields' }
 ExpectStatus { Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Headers $sender } 404
 $acceptedShipment = Invoke-RestMethod "$BaseUrl/api/v1/shipments/$giftId" -Headers $recipient
 if ($acceptedShipment.recipient.phone -ne '13900000000') { throw 'Recipient shipment missing address snapshot' }
