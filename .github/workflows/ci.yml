@@ -35,6 +35,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 scripts/check-release-version.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets
       - run: cargo build --locked
@@ -49,8 +52,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       packages: write
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -69,7 +73,8 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=long
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -78,3 +83,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Prepare versioned deployment package
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIYU_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "liyu-server-tests-$GITHUB_SHA" --dir build/release
+          python3 scripts/prepare-release.py
+      - name: Publish server release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "礼遇服务端 $GITHUB_REF_NAME" --notes-file build/release-notes.md

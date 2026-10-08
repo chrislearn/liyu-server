@@ -186,3 +186,11 @@ API 测试完成后 CI 上传 `api-tests.json`，记录测试源码提交、工�
 GitHub Actions 已固定到完整提交 SHA，Cargo 依赖使用锁文件；基础容器标签仍会更新，因此这是可追溯构建，不是字节级可重复构建保证。数据库、Caddy及服务端镜像可进一步按已验证摘要固定。GHCR 首次包可能为私有，确认可见性后再承诺其他人能匿名拉取。
 
 公开发行或平台收录、发布者签名和苹果公证是不同步骤。此仓库的 Docker CI 通过不证明小程序跨平台界面或真实支付通过。服务端隐私和删除边界见根目录 `PRIVACY.md`。
+
+## 6. 版本发布与部署包
+
+[GitHub Releases](https://github.com/chrislearn/liyu-server/releases) 提供对应版本的源码与部署配置 ZIP、测试报告、镜像标签及固定摘要。镜像仍从 GHCR 拉取，ZIP 不是容器镜像。
+
+先更新 Cargo.toml 的 package.version 和 Cargo.lock，提交后推送一致的版本标签，如 `git tag v0.1.0 && git push origin v0.1.0`。标签 CI 校验版本、运行测试、发布双架构镜像，然后自动创建 Release；任一前置任务失败均不发布 Release。main 推送继续发布 main 镜像，不创建版本 Release。
+
+下载 ZIP 后解压，按照本指南配置环境。线上将 LIYU_IMAGE 设置为发布页提供的版本标签或固定摘要，再执行 Compose pull 与 up。源码 ZIP 也包含本地构建所需文件。不要移动已发布的版本标签；升级应使用新的版本号。
