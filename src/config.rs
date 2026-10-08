@@ -5,6 +5,7 @@ pub(crate) struct Config {
     pub pool_max_size: u32,
     pub data_dir: PathBuf,
     pub admin_cookie_secure: bool,
+    pub production: bool,
 }
 
 impl Config {
@@ -23,10 +24,17 @@ impl Config {
             Ok("false") | Err(_) => false,
             _ => return Err("LIYU_ADMIN_COOKIE_SECURE must be true or false".into()),
         };
+        let production = parse_environment(std::env::var("LIYU_ENV").ok().as_deref())?;
+        if production && (crate::contact_delivery::test_mode() || !admin_cookie_secure) {
+            return Err(
+                "production requires LIYU_TEST_DELIVERY=false and secure admin cookies".into(),
+            );
+        }
         Ok(Self {
             pool_max_size,
             data_dir,
             admin_cookie_secure,
+            production,
         })
     }
 
@@ -48,6 +56,14 @@ impl Config {
     }
 }
 
+fn parse_environment(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("development") => Ok(false),
+        Some("production") => Ok(true),
+        _ => Err("LIYU_ENV must be development or production".into()),
+    }
+}
+
 fn parse_pool_size(value: Option<&str>) -> Result<u32, String> {
     match value {
         None => Ok(8),
@@ -63,6 +79,15 @@ fn parse_pool_size(value: Option<&str>) -> Result<u32, String> {
 mod tests {
     use super::*;
     #[test]
+    fn rejects_misspelled_environment() {
+        assert!(!parse_environment(None).unwrap());
+        assert!(!parse_environment(Some("development")).unwrap());
+        assert!(parse_environment(Some("production")).unwrap());
+        for value in ["prod", "Production", "", "production "] {
+            assert!(parse_environment(Some(value)).is_err());
+        }
+    }
+    #[test]
     fn pool_size_rejects_invalid_configuration() {
         assert_eq!(parse_pool_size(None).unwrap(), 8);
         assert_eq!(parse_pool_size(Some("1")).unwrap(), 1);
@@ -77,6 +102,7 @@ mod tests {
             pool_max_size: 1,
             data_dir: root.clone(),
             admin_cookie_secure: false,
+            production: false,
         };
         config.prepare_storage().unwrap();
         assert!(root.join("avatars").is_dir());

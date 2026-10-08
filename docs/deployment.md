@@ -56,7 +56,7 @@ curl --cacert build/liyu-local-root.crt https://liyu.localhost:8443/health
 
 ### 开发账号、验证码与测试
 
-仅本地模式允许迁移中的 `demo@liyu.test`、`linzhou@liyu.test`、`chenxiao@liyu.test`，密码 `123456`。注册先申请验证码，测试响应才包含 `test_code`。生产模式禁止测试验证码，且禁用仍使用迁移测试密码哈希的账号并撤销其会话。
+仅本地模式允许迁移中的 `demo@liyu.test`、`linzhou@liyu.test`、`chenxiao@liyu.test`，密码 `123456`。注册先申请验证码，测试响应才包含 `test_code`。`LIYU_ENV` 只接受 `development` 或 `production`，拼写错误会在连接数据库前拒绝启动。生产模式要求安全管理 Cookie，禁止测试验证码，且禁用仍使用迁移测试密码哈希的账号并撤销其会话。
 
 可执行下面的集成测试；执行环境需要 Rust、Python 3 与 `psql`，数据库连接用户需要创建测试数据库的权限。运行器为每组测试创建独立数据库并在结束后删除，另起回环 HTTP 测试后端，不修改原数据库中的业务数据。将连接字符串替换为自己的本地数据库：
 
@@ -178,3 +178,11 @@ docker compose --env-file deploy/production.env cp server:/data backups/media
 - 收不到验证码：确认关闭测试模式且发送桥正确，避免把测试验证码作为真实验证方式。
 
 参考：[GitHub 镜像发布](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)、[GHCR 访问与可见性](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)、[Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)。
+
+## 发布与证据对应
+
+API 测试完成后 CI 上传 `api-tests.json`，记录测试源码提交、工作目录是否干净和实际通过的测试组。容器发布使用同一提交的 `sha-<完整 SHA>` 标签；线上仍应固定 Packages 提供的镜像摘要，不能把浮动 `main` 标签作为长期复现标识。
+
+GitHub Actions 已固定到完整提交 SHA，Cargo 依赖使用锁文件；基础容器标签仍会更新，因此这是可追溯构建，不是字节级可重复构建保证。数据库、Caddy及服务端镜像可进一步按已验证摘要固定。GHCR 首次包可能为私有，确认可见性后再承诺其他人能匿名拉取。
+
+公开发行或平台收录、发布者签名和苹果公证是不同步骤。此仓库的 Docker CI 通过不证明小程序跨平台界面或真实支付通过。服务端隐私和删除边界见根目录 `PRIVACY.md`。

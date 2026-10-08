@@ -428,10 +428,7 @@ async fn main() {
         contact_delivery::ensure_schema(&mut conn).expect("upgrade contact book schema");
         admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
         management::ensure_schema(&mut conn).expect("upgrade management schema");
-        if std::env::var("LIYU_ENV").as_deref() == Ok("production") {
-            if contact_delivery::test_mode() || !config().admin_cookie_secure {
-                panic!("production requires LIYU_TEST_DELIVERY=false and secure admin cookies");
-            }
+        if config().production {
             // Old migrations seed known test passwords. Never permit them on a public deployment.
             diesel::sql_query("UPDATE users SET is_active=false WHERE password_hash=$1")
                 .bind::<Text, _>(hash_secret(TEST_CODE))

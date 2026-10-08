@@ -4,6 +4,8 @@ Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, 
 
 LIYU-MINI now signs in through a server-owned browser authorization page and calls business APIs over standard HTTPS, without a custom LIYU host service. See [browser authorization](docs/browser-authorization.md) for protocol, expiry, cancellation and testing.
 
+数据范围、供应商传输、会话撤销及删除边界见[服务端隐私说明](PRIVACY.md)。
+
 ## 容器部署与持续集成
 
 完整步骤见[部署指南](docs/deployment.md)：Docker Compose 一键启动 PostgreSQL、服务端和 Caddy，本地内部 HTTPS、线上域名及证书、GHCR 镜像发布、验证服务、升级与备份。镜像包含管理后台与商品图片，无需 LIYU 专用宿主。

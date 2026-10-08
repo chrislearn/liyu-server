@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run each destructive integration suite on its own disposable database."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +14,7 @@ root = Path(__file__).resolve().parents[1]
 admin_dsn = os.environ['DATABASE_URL']
 parts = urlsplit(admin_dsn)
 port = int(os.environ.get('LIYU_CI_PORT', '18788'))
+results = []
 for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
                       ('wishlist', 'wishlist_drafts_e2e.py'),
                       ('contract', 'contract_marks_e2e.py')]:
@@ -42,8 +44,17 @@ for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
             if prefix == 'browser_auth':
                 subprocess.run(['cargo', 'test', '--locked'], cwd=root, env=env, check=True)
             subprocess.run(['python3', str(root / 'tests' / suite), f'http://127.0.0.1:{port}'], env=env, check=True)
+            results.append({'suite': suite, 'result': 'passed', 'database': 'isolated disposable database'})
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
         subprocess.run(['psql', admin_dsn, '-v', 'ON_ERROR_STOP=1', '-c', f'DROP DATABASE {name} WITH (FORCE)'], check=True, stdout=subprocess.DEVNULL)
+
+output = root / 'build/verification'
+output.mkdir(parents=True, exist_ok=True)
+report = {'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+          'working_tree_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, text=True).strip()),
+          'unit_tests': 'cargo test --locked passed', 'api_suites': results,
+          'ci_run_id': os.environ.get('GITHUB_RUN_ID'), 'scope': 'API and database tests; no GUI or real payment claim'}
+(output / 'api-tests.json').write_text(json.dumps(report, indent=2) + '\n')
