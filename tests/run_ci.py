@@ -49,7 +49,16 @@ for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
         if process is not None and process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
-        subprocess.run(['psql', admin_dsn, '-v', 'ON_ERROR_STOP=1', '-c', f'DROP DATABASE {name} WITH (FORCE)'], check=True, stdout=subprocess.DEVNULL)
+        # The test server has exited; avoid FORCE, which can require permission
+        # to terminate an unrelated autovacuum backend on the scratch database.
+        for attempt in range(10):
+            dropped = subprocess.run(['psql', admin_dsn, '-v', 'ON_ERROR_STOP=1', '-c', f'DROP DATABASE {name}'], capture_output=True, text=True)
+            if dropped.returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError('Could not remove scratch database ' + name + ': ' + dropped.stderr)
+
 
 output = root / 'build/verification'
 output.mkdir(parents=True, exist_ok=True)

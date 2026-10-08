@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG RUST_IMAGE=rust:1-bookworm
-FROM ${RUST_IMAGE} AS ui
+# WebAssembly assets are architecture independent; build once on the runner.
+FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS ui
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends clang lld pkg-config libssl-dev python3 && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown

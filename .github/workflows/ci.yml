@@ -5,6 +5,9 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+concurrency:
+  group: liyu-server-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -12,12 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-            - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: liyu-server-tests-${{ github.sha }}
-          path: build/verification/api-tests.json
-          if-no-files-found: error
-  image: postgres:17-bookworm
+        image: postgres:17-bookworm
         env:
           POSTGRES_DB: liyu_ci
           POSTGRES_USER: liyu
@@ -42,6 +40,11 @@ jobs:
       - run: cargo build --locked
       - name: Migrate and test isolated disposable databases
         run: python3 tests/run_ci.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: liyu-server-tests-${{ github.sha }}
+          path: build/verification/api-tests.json
+          if-no-files-found: error
   image:
     needs: test
     runs-on: ubuntu-latest
