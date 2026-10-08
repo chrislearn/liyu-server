@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Run each destructive integration suite on its own disposable database."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import urllib.request
+from urllib.parse import urlsplit, urlunsplit
+import uuid
+
+root = Path(__file__).resolve().parents[1]
+admin_dsn = os.environ['DATABASE_URL']
+parts = urlsplit(admin_dsn)
+port = int(os.environ.get('LIYU_CI_PORT', '18788'))
+for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
+                      ('wishlist', 'wishlist_drafts_e2e.py'),
+                      ('contract', 'contract_marks_e2e.py')]:
+    name = f'liyu_{prefix}_test_{uuid.uuid4().hex[:12]}'
+    subprocess.run(['psql', admin_dsn, '-v', 'ON_ERROR_STOP=1', '-c', f'CREATE DATABASE {name}'], check=True, stdout=subprocess.DEVNULL)
+    env = dict(os.environ, DATABASE_URL=urlunsplit(parts._replace(path='/' + name)),
+               LIYU_BIND=f'127.0.0.1:{port}', LIYU_TEST_DELIVERY='true', LIYU_ENV='development')
+    process = None
+    try:
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen([str(root / 'target/debug/liyu-server')], cwd=root, env=env, stdout=log, stderr=log)
+            for _ in range(60):
+                if process.poll() is not None:
+                    break
+                try:
+                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except OSError:
+                    time.sleep(1)
+            else:
+                raise RuntimeError('server health timeout')
+            if process.poll() is not None:
+                log.seek(0)
+                print(log.read().decode())
+                raise RuntimeError('server startup failed')
+            if prefix == 'browser_auth':
+                subprocess.run(['cargo', 'test', '--locked'], cwd=root, env=env, check=True)
+            subprocess.run(['python3', str(root / 'tests' / suite), f'http://127.0.0.1:{port}'], env=env, check=True)
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+        subprocess.run(['psql', admin_dsn, '-v', 'ON_ERROR_STOP=1', '-c', f'DROP DATABASE {name} WITH (FORCE)'], check=True, stdout=subprocess.DEVNULL)

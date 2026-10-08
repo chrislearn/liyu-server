@@ -1,6 +1,12 @@
-# LiYu test server
+# LIYU 服务端
 
 Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, current gaps, API inventory and privacy matrix are in [todos/app-api.md](todos/app-api.md). This backend keeps test payment and carrier flows; contact gifting now has verified identities and a configurable SMS/email delivery bridge. See [contact delivery](docs/contact-delivery.md). Bind to loopback by default; fixed test credentials must never be exposed publicly.
+
+LIYU-MINI now signs in through a server-owned browser authorization page and calls business APIs over standard HTTPS, without a custom LIYU host service. See [browser authorization](docs/browser-authorization.md) for protocol, expiry, cancellation and testing.
+
+## 容器部署与持续集成
+
+完整步骤见[部署指南](docs/deployment.md)：Docker Compose 一键启动 PostgreSQL、服务端和 Caddy，本地内部 HTTPS、线上域名及证书、GHCR 镜像发布、验证服务、升级与备份。镜像包含管理后台与商品图片，无需 LIYU 专用宿主。
 
 ## Run
 
@@ -44,7 +50,7 @@ $headers = @{Authorization="Bearer $($refreshed.token)"}
 Invoke-RestMethod "$base/api/v1/auth/logout" -Method Post -Headers $headers
 ```
 
-`LIYU_API_URL` lets the app reach this test server; `LIYU_IDENTIFIER` selects another seeded/registered account, and `LIYU_AUTH_TOKEN` overrides automatic login. The app falls back to local demo data when the server is unavailable. The old whole-state endpoint permanently returns `410`: its JSON would contain private gift answers, addresses and money entries. Online workflows use the domain APIs below.
+Legacy native LIYU integrations may use `LIYU_API_URL`, `LIYU_IDENTIFIER`, and `LIYU_AUTH_TOKEN`. LIYU-MINI instead calls standard HTTPS directly and obtains its own session through browser authorization. It never falls back to demo data on network failure; local demo is an explicit separate entry. The old whole-state endpoint permanently returns `410`: its JSON would contain private gift answers, addresses and money entries. Online workflows use the domain APIs below.
 
 ## Storage and connection pool
 

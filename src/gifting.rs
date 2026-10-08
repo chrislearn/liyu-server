@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{Array, BigInt, Bool, Integer, Nullable, Text};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{error, pool, user_id};
@@ -1146,11 +1146,9 @@ mod tests {
         assert_eq!(sender_view["contract_text"], "有空喝杯咖啡");
         assert!(!sender_view.to_string().contains("tracking_number"));
         assert!(!sender_view.to_string().contains("recipient_address"));
-        assert!(
-            sender_projection(sender_fixture("sealed"))
-                .get("contract_text")
-                .is_none()
-        );
+        assert!(sender_projection(sender_fixture("sealed"))
+            .get("contract_text")
+            .is_none());
     }
 
     #[test]

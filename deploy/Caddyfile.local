@@ -1,0 +1,7 @@
+{
+    skip_install_trust
+}
+https://liyu.localhost {
+    tls internal
+    reverse_proxy server:8787
+}

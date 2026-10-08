@@ -15,3 +15,8 @@ tmp/*
 /admin-ui/dist/
 /web/dist/
 /web/dist-next/
+/deploy/*.env
+/backups/
+
+/build/
+__pycache__/

@@ -1,0 +1,59 @@
+name: liyu
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: liyu
+      POSTGRES_USER: liyu
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the chosen env file}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U liyu -d liyu']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  server:
+    image: ${LIYU_IMAGE:-liyu-server:local}
+    environment:
+      DATABASE_URL: postgres://liyu:${POSTGRES_PASSWORD}@db:5432/liyu
+      LIYU_BIND: 0.0.0.0:8787
+      LIYU_DATA_DIR: /data
+      LIYU_ENV: ${LIYU_ENV:-production}
+      LIYU_DB_POOL_MAX_SIZE: ${LIYU_DB_POOL_MAX_SIZE:-8}
+      LIYU_TEST_DELIVERY: ${LIYU_TEST_DELIVERY:-false}
+      LIYU_ADMIN_USERNAME: ${LIYU_ADMIN_USERNAME:-}
+      LIYU_ADMIN_PASSWORD: ${LIYU_ADMIN_PASSWORD:-}
+      LIYU_ADMIN_COOKIE_SECURE: 'true'
+      LIYU_PUBLIC_URL: ${LIYU_PUBLIC_URL:-}
+      LIYU_DELIVERY_WEBHOOK: ${LIYU_DELIVERY_WEBHOOK:-}
+      LIYU_DELIVERY_TOKEN: ${LIYU_DELIVERY_TOKEN:-}
+    volumes:
+      - media-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    environment:
+      LIYU_DOMAIN: ${LIYU_DOMAIN:-liyu.localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - '${LIYU_HTTP_BIND:-80}:80'
+      - '${LIYU_HTTPS_BIND:-443}:443'
+      - '${LIYU_HTTPS_BIND:-443}:443/udp'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  media-data:
+  caddy-data:
+  caddy-config:

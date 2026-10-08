@@ -1,0 +1,9 @@
+services:
+  server:
+    build: .
+    environment:
+      LIYU_ENV: development
+      LIYU_TEST_DELIVERY: 'true'
+  caddy:
+    volumes:
+      - ./deploy/Caddyfile.local:/etc/caddy/Caddyfile:ro

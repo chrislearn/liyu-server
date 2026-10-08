@@ -1,6 +1,7 @@
 mod admin;
 mod avatar;
 mod benefits;
+mod browser_auth;
 mod catalog;
 mod commerce;
 mod config;
@@ -148,6 +149,10 @@ async fn health(res: &mut Response) {
 }
 
 async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) {
+    authenticate_with_ttl(req, res, is_register, SESSION_TTL_SECONDS).await
+}
+
+async fn authenticate_with_ttl(req: &mut Request, res: &mut Response, is_register: bool, ttl: i64) {
     use schema::users::dsl::*;
     let body: Credentials = match req.parse_json().await {
         Ok(body) => body,
@@ -277,9 +282,10 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
         return error(res, StatusCode::UNAUTHORIZED, "invalid password");
     }
     let token = new_session_token();
-    use schema::sessions::dsl::{sessions, token_hash as session_hash, user_id as session_user};
-    if diesel::insert_into(sessions)
-        .values((session_hash.eq(hash_secret(&token)), session_user.eq(uid)))
+    if diesel::sql_query("INSERT INTO sessions (token_hash,user_id,expires_at) VALUES ($1,$2,now()+$3*interval '1 second')")
+        .bind::<Text,_>(hash_secret(&token))
+        .bind::<BigInt,_>(uid)
+        .bind::<BigInt,_>(ttl)
         .execute(&mut conn)
         .is_err()
     {
@@ -291,7 +297,7 @@ async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) 
     }
     res.render(Json(json!({
         "token": token,
-        "expires_in_seconds": SESSION_TTL_SECONDS,
+        "expires_in_seconds": ttl,
         "test_delivery":contact_delivery::test_mode(),
         "user": {"id": uid, "identifier": identity, "display_name": name}
     })));
@@ -422,6 +428,21 @@ async fn main() {
         contact_delivery::ensure_schema(&mut conn).expect("upgrade contact book schema");
         admin::ensure_schema(&mut conn).expect("upgrade administrator schema");
         management::ensure_schema(&mut conn).expect("upgrade management schema");
+        if std::env::var("LIYU_ENV").as_deref() == Ok("production") {
+            if contact_delivery::test_mode() || !config().admin_cookie_secure {
+                panic!("production requires LIYU_TEST_DELIVERY=false and secure admin cookies");
+            }
+            // Old migrations seed known test passwords. Never permit them on a public deployment.
+            diesel::sql_query("UPDATE users SET is_active=false WHERE password_hash=$1")
+                .bind::<Text, _>(hash_secret(TEST_CODE))
+                .execute(&mut conn)
+                .expect("disable known test credentials");
+            diesel::sql_query(
+                "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE NOT is_active)",
+            )
+            .execute(&mut conn)
+            .expect("revoke disabled account sessions");
+        }
         admin::bootstrap(&mut conn).expect("initialize administrator");
     }
     DB.set(db)
@@ -432,6 +453,7 @@ async fn main() {
     occasion_reminders::start_worker();
     let router = Router::new()
         .push(Router::with_path("health").get(health))
+        .push(browser_auth::routes())
         .push(admin::routes())
         .push(management::routes())
         .push(benefits::routes())
