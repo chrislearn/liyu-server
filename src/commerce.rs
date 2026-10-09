@@ -42,6 +42,18 @@ struct OrderRow {
 }
 
 #[derive(QueryableByName)]
+struct PriorOrderRow {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+    #[diesel(sql_type = BigInt)]
+    total_cents: i64,
+    #[diesel(sql_type = Text)]
+    status: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    request_hash: Option<String>,
+}
+
+#[derive(QueryableByName)]
 struct OrderItemRow {
     #[diesel(sql_type = BigInt)]
     id: i64,
@@ -304,7 +316,10 @@ async fn create_order(req: &mut Request, res: &mut Response) {
     let Some(uid) = user_id(req) else {
         return error(res, StatusCode::UNAUTHORIZED, "invalid session");
     };
-    let Ok(request) = req.parse_json::<CheckoutRequest>().await else {
+    let Ok(raw) = req.parse_json::<serde_json::Value>().await else {
+        return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
+    };
+    let Ok(request) = serde_json::from_value::<CheckoutRequest>(raw.clone()) else {
         return error(res, StatusCode::BAD_REQUEST, "invalid checkout");
     };
     let Some((inputs, expires_hours)) = request.parts() else {
@@ -318,6 +333,21 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         Ok(v) => v,
         Err(_) => return error(res, StatusCode::BAD_REQUEST, "invalid coupon id"),
     };
+    let expected = match req.headers().get("X-Expected-Total-Cents") {
+        None => None,
+        Some(v) => match v
+            .to_str()
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+        {
+            Some(v) => Some(v),
+            None => return error(res, StatusCode::BAD_REQUEST, "invalid expected total"),
+        },
+    };
+    let request_hash = crate::hash_secret(
+        &json!({"body": raw, "coupon": coupon, "expected_total": expected}).to_string(),
+    );
     let key = req
         .headers()
         .get("Idempotency-Key")
@@ -332,8 +362,13 @@ async fn create_order(req: &mut Request, res: &mut Response) {
     };
     let result=conn.transaction::<Result<Option<OrderRow>,serde_json::Value>,diesel::result::Error,_>(|conn|{
         sql_query("SELECT pg_advisory_xact_lock($1)").bind::<BigInt,_>(uid).execute(conn)?;
-        if let Some(prior)=sql_query("SELECT id,total_cents,status FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
-            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<OrderRow>(conn).optional()? {return Ok(Ok(Some(prior)))}
+        if let Some(prior)=sql_query("SELECT id,total_cents,status,request_hash FROM orders WHERE buyer_id=$1 AND idempotency_key=$2")
+            .bind::<BigInt,_>(uid).bind::<Text,_>(key).get_result::<PriorOrderRow>(conn).optional()? {
+            if prior.request_hash.as_deref() != Some(request_hash.as_str()) {
+                return Ok(Err(json!({"error":"idempotency key belongs to another request; inspect the existing order", "order_id":prior.id})));
+            }
+            return Ok(Ok(Some(OrderRow{id:prior.id,total_cents:prior.total_cents,status:prior.status})))
+        }
         let mut prepared=Vec::with_capacity(inputs.len());
         for input in &inputs {
             let Some(item)=prepare(conn,uid,input)? else {return Ok(Ok(None))};
@@ -348,8 +383,11 @@ async fn create_order(req: &mut Request, res: &mut Response) {
         let Some(subtotal)=prepared.iter().try_fold(0_i64,|sum,item|sum.checked_add(item.price_cents)) else {return Ok(Ok(None))};
         let prices:Vec<_>=prepared.iter().map(|item|(item.product_id,item.price_cents)).collect();
         let (discount,allocated)=crate::benefits::discount(conn,uid,coupon,&prices)?;
-        let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id,gift_expires_hours) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,total_cents,status")
-            .bind::<BigInt,_>(uid).bind::<BigInt,_>(subtotal-discount).bind::<Text,_>(key).bind::<BigInt,_>(subtotal).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).bind::<Integer,_>(expires_hours).get_result::<OrderRow>(conn)?;
+        if expected.is_some_and(|value| value != subtotal-discount) {
+            return Ok(Err(json!({"error":"price changed; request a new quote and confirm", "code":"quote_changed", "total_cents":subtotal-discount})));
+        }
+        let order=sql_query("INSERT INTO orders (buyer_id,total_cents,idempotency_key,subtotal_cents,discount_cents,coupon_id,gift_expires_hours,request_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,total_cents,status")
+            .bind::<BigInt,_>(uid).bind::<BigInt,_>(subtotal-discount).bind::<Text,_>(key).bind::<BigInt,_>(subtotal).bind::<BigInt,_>(discount).bind::<Nullable<BigInt>,_>(coupon).bind::<Integer,_>(expires_hours).bind::<Text,_>(&request_hash).get_result::<OrderRow>(conn)?;
         crate::benefits::reserve(conn,uid,coupon,order.id)?;
         for (index,item) in prepared.iter().enumerate() {
             sql_query("INSERT INTO order_items (order_id,product_id,recipient_id,price_cents,wish_item_id,recipient_contact,recipient_bound_user_id,recipient_change_confirmed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")

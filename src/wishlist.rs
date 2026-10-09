@@ -104,7 +104,7 @@ struct FriendDetailsInput {
     note: String,
 }
 
-fn valid_occasion_date(value: &str) -> bool {
+pub(crate) fn valid_occasion_date(value: &str) -> bool {
     if value.is_empty() {
         return true;
     }

@@ -18,6 +18,7 @@ results = []
 for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
                       ('wishlist', 'wishlist_drafts_e2e.py'),
                       ('contract', 'contract_marks_e2e.py'),
+                      ('purchase', 'purchase_calendar_e2e.py'),
                       ('fallback_no_token', 'test_mode_e2e.py'),
                       ('fallback_no_webhook', 'test_mode_e2e.py')]:
     name = f'liyu_{prefix}_test_{uuid.uuid4().hex[:12]}'

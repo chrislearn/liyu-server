@@ -13,6 +13,7 @@ mod gifting;
 mod management;
 mod occasion_reminders;
 mod profile;
+mod purchase_calendar;
 mod schema;
 mod wishlist;
 
@@ -440,6 +441,7 @@ async fn main() {
             .execute(&mut conn)
             .expect("revoke disabled account sessions");
         }
+        purchase_calendar::ensure_schema(&mut conn).expect("upgrade purchase and calendar schema");
         admin::bootstrap(&mut conn).expect("initialize administrator");
     }
     DB.set(db)
@@ -467,6 +469,7 @@ async fn main() {
         .push(wishlist::routes())
         .push(friend_tags::routes())
         .push(gifting::routes())
+        .push(purchase_calendar::routes())
         .push(demo_logistics::routes())
         .push(Router::with_path("api/v1/me").get(me))
         .push(

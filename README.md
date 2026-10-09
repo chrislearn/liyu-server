@@ -167,3 +167,13 @@ The additive `20260930030000_wishlist_drafts` migration marks existing lists as 
 ## 产品名词
 
 中文用户文案使用：商品（目录及心愿单内容）、礼盒（用户送出的对象）、礼物（收礼人成功拆开礼盒后收到的商品）。未指定具体商品的种类及预算条目标为「商品需求」。解谜中的礼盒尚未拆开；送礼通知和送出记录均称「礼盒」。商品原名和用户自填标题、寄语不作改写。API 路径与数据库字段继续使用既有标识。
+
+## 购买核验、双方约定日期与日历（v0.1.3 源码，未部署）
+
+客户端创建订单可传 `X-Expected-Total-Cents`，重新计价与确认金额不符返回 409 且不建单。同一个 Idempotency-Key 只允许原请求和原确认金额，改变内容返回冲突。旧版没有请求摘要的订单仍可读取，不能凭旧 key 盲目重试。送礼人能读取自己的拆盒设置、寄语与约定以核验配置，但答案及摘要不返回。
+
+已接受的礼物约定支持 GET/PUT `/api/v1/contracts/{id}/schedule`；PUT 提交 `{proposed_on:"YYYY-MM-DD",expected_revision:N}`，空日期代表提议清除。另一参与者 POST `/schedule/confirm` 提交 `{expected_revision:N}` 后生效；提出者可 POST `/schedule/cancel` 撤回。过期版本、自确认及越权操作拒绝。新提议不覆盖原生效日期，各自兑现状态保持独立。启动时幂等升级原约定迁移，不要求已经执行过该迁移的数据库手动补表。
+
+POST `/calendar-export` 创建五分钟导出页，随机密钥在 URL fragment 中，下载时重新核验原会话、双方关系及已确认日期。下载一次后密钥失效。生成 UTF-8/CRLF iCalendar 全天事件，可手动导入日历；无对方联系方式、无自动邀请、无系统日历读写或自动同步。改期或清除后需用户自行核对已导入事件。
+
+此项目按 [Apache License 2.0](LICENSE) 授权，Cargo 元数据为 Apache-2.0。

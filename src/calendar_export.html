@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>礼遇 · 导出约定日历</title>
+<style>body{font:16px system-ui;background:#faf7ff;color:#302140;max-width:600px;margin:40px auto;padding:20px}button{padding:12px 20px;background:#68419c;color:white;border:0;border-radius:8px}textarea{width:100%;height:240px;margin-top:16px}p{line-height:1.7}</style>
+<h1>导出双方确认的约定日历</h1><p>这是双方在礼遇中已确认的约定日期。下载 .ics 文件后，在 Apple 日历、Google 日历或 Outlook 中手动导入。导出不会自动写入日历，也不会邀请对方；以后改期须再次确认并重新导入。</p>
+<button id="download">生成日历文件</button><p id="status">链接五分钟有效，只能领取一次。请不要转发此页面链接。</p><a id="save" hidden>下载 .ics 文件</a><textarea id="content" readonly hidden aria-label="日历文件内容"></textarea>
+<script>
+const key=location.hash.slice(1),id=location.pathname.split('/').pop();history.replaceState(null,'',location.pathname);
+const button=document.getElementById('download'),status=document.getElementById('status');
+button.onclick=async()=>{button.disabled=true;try{const r=await fetch('/api/v1/calendar-exports/'+encodeURIComponent(id)+'/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});const data=await r.json();if(!r.ok)throw Error(data.error||'导出失败');const link=document.getElementById('save');link.href=URL.createObjectURL(new Blob([data.content],{type:'text/calendar;charset=utf-8'}));link.download=data.filename;link.hidden=false;document.getElementById('content').value=data.content;document.getElementById('content').hidden=false;status.textContent='日历文件已生成。请点击下载并手动导入；若内置网页不支持下载，请复制下方内容保存为 .ics 文件。尚未确认加入任何日历。';}catch(e){status.textContent='未能生成日历文件，请返回礼遇重新导出：'+e.message;}};
+</script></html>

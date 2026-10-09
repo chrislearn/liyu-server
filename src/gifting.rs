@@ -171,6 +171,8 @@ struct ContractRow {
     status: String,
     #[diesel(sql_type = Text)]
     created_on: String,
+    #[diesel(sql_type = Text)]
+    planned_on: String,
 }
 
 #[derive(QueryableByName)]
@@ -333,6 +335,16 @@ fn render_gift_detail(
     id: i64,
     mut value: Value,
 ) {
+    // The sender can read back their own settings, never the answer or its hash.
+    #[derive(QueryableByName)]
+    struct Settings {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        data: Value,
+    }
+    if let Some(settings) = diesel::sql_query("SELECT jsonb_build_object('unlock_kind',unlock_kind,'clue',clue,'message',message,'contract_text',contract_text) AS data FROM gifts WHERE id=$2 AND sender_id=$1")
+        .bind::<BigInt,_>(uid).bind::<BigInt,_>(id).get_result::<Settings>(conn).optional().map_err(|_| ()).ok().flatten() {
+        for (key, setting) in settings.data.as_object().unwrap() { value[key] = setting.clone(); }
+    }
     let mark = diesel::sql_query(
         "SELECT g.id AS gift_id,COALESCE(m.status,'pending') AS status \
          FROM gifts g LEFT JOIN gift_contract_marks m ON m.gift_id=g.id AND m.user_id=$1 \
@@ -938,10 +950,11 @@ async fn contracts(req: &mut Request, res: &mut Response) {
         "SELECT g.id AS gift_id,(g.recipient_id=$1) AS mine, \
          CASE WHEN g.recipient_id=$1 THEN sender.display_name ELSE recipient.display_name END AS peer_name, \
          g.product_id,g.contract_text,COALESCE(c.status,'pending') AS status, \
-         to_char(g.created_at,'YYYY-MM-DD') AS created_on \
+         to_char(g.created_at,'YYYY-MM-DD') AS created_on,COALESCE(to_char(d.confirmed_on,'YYYY-MM-DD'),'') AS planned_on \
          FROM gifts g JOIN users sender ON sender.id=g.sender_id \
          JOIN users recipient ON recipient.id=g.recipient_id \
          LEFT JOIN gift_contract_marks c ON c.gift_id=g.id AND c.user_id=$1 \
+         LEFT JOIN gift_contract_schedules d ON d.gift_id=g.id \
          WHERE (g.sender_id=$1 OR g.recipient_id=$1) AND g.state='accepted' \
          AND g.contract_text<>'' ORDER BY g.created_at DESC,g.id DESC LIMIT 100",
     )
