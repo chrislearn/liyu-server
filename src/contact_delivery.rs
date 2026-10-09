@@ -73,12 +73,20 @@ pub(crate) fn normalize(kind: &str, value: &str) -> Option<String> {
     }
 }
 pub(crate) fn validate_config() -> Result<(), String> {
+    if let Ok(mode) = std::env::var("LIYU_TEST_MODE") {
+        if mode != "true" && mode != "false" {
+            return Err("LIYU_TEST_MODE must be true or false".into());
+        }
+    }
     if let Ok(mode) = std::env::var("LIYU_TEST_DELIVERY") {
         if mode != "true" && mode != "false" {
             return Err("LIYU_TEST_DELIVERY must be true or false".into());
         }
     }
-    if let Ok(url) = std::env::var("LIYU_DELIVERY_WEBHOOK") {
+    if let Some(url) = std::env::var("LIYU_DELIVERY_WEBHOOK")
+        .ok()
+        .filter(|_| !test_fallback())
+    {
         if !url.is_empty() {
             if !(url.starts_with("https://")
                 || (test_mode() && url.starts_with("http://127.0.0.1:")))
@@ -140,6 +148,24 @@ pub(crate) fn ensure_schema(conn: &mut PgConnection) -> Result<(), String> {
 
 pub(crate) fn test_mode() -> bool {
     std::env::var("LIYU_TEST_DELIVERY").as_deref() == Ok("true")
+}
+
+fn use_fixed_code(enabled: bool, webhook: Option<&str>, token: Option<&str>) -> bool {
+    enabled
+        && (webhook.is_none_or(|v| v.trim().is_empty())
+            || token.is_none_or(|v| v.trim().is_empty()))
+}
+
+pub(crate) fn test_fallback() -> bool {
+    use_fixed_code(
+        std::env::var("LIYU_TEST_MODE").as_deref() == Ok("true"),
+        std::env::var("LIYU_DELIVERY_WEBHOOK").ok().as_deref(),
+        std::env::var("LIYU_DELIVERY_TOKEN").ok().as_deref(),
+    )
+}
+
+pub(crate) fn verification_test_mode() -> bool {
+    test_mode() || test_fallback()
 }
 
 #[derive(QueryableByName)]
@@ -564,7 +590,7 @@ async fn challenge(req: &mut Request, res: &mut Response) {
     } else {
         return error(res, StatusCode::BAD_REQUEST, "invalid purpose");
     };
-    if !test_mode()
+    if !verification_test_mode()
         && std::env::var("LIYU_DELIVERY_WEBHOOK")
             .ok()
             .filter(|s| !s.is_empty())
@@ -587,7 +613,7 @@ async fn challenge(req: &mut Request, res: &mut Response) {
     let source_hash = hash_secret(&source);
     let id = new_session_token();
     let random = uuid::Uuid::new_v4();
-    let code = if test_mode() {
+    let code = if verification_test_mode() {
         "123456".into()
     } else {
         format!(
@@ -605,13 +631,13 @@ async fn challenge(req: &mut Request, res: &mut Response) {
         if recent.id>0 || quota.id>=30 { return Ok(false); }
         sql_query("INSERT INTO contact_challenges(id,kind,value,purpose,owner_id,code_hash,source_hash) VALUES($1,$2,$3,$4,$5,$6,$7)")
             .bind::<Text,_>(&id).bind::<Text,_>(&input.kind).bind::<Text,_>(&value).bind::<Text,_>(&input.purpose).bind::<Nullable<BigInt>,_>(owner).bind::<Text,_>(hash_secret(&code)).bind::<Text,_>(&source_hash).execute(conn)?;
-        if !test_mode() {
+        if !verification_test_mode() {
             sql_query("INSERT INTO delivery_outbox(event_key,kind,destination,payload) VALUES($1,$2,$3,$4)")
                 .bind::<Text,_>(format!("challenge:{id}")).bind::<Text,_>(&input.kind).bind::<Text,_>(&value).bind::<Jsonb,_>(json!({"type":"verification","code":code,"expires_in_seconds":600})).execute(conn)?;
         }
         Ok(true)
     });
-    match result { Ok(true)=>res.render(Json(json!({"challenge_id":id,"expires_in_seconds":600,"test_code":if test_mode(){Some(code)}else{None}}))),Ok(false)=>error(res,StatusCode::TOO_MANY_REQUESTS,"please wait before requesting another code"),Err(_)=>error(res,StatusCode::INTERNAL_SERVER_ERROR,"cannot request verification") }
+    match result { Ok(true)=>res.render(Json(json!({"challenge_id":id,"expires_in_seconds":600,"test_code":if verification_test_mode(){Some(code)}else{None}}))),Ok(false)=>error(res,StatusCode::TOO_MANY_REQUESTS,"please wait before requesting another code"),Err(_)=>error(res,StatusCode::INTERNAL_SERVER_ERROR,"cannot request verification") }
 }
 
 // The caller must persist failed attempts even when verification is rejected.
@@ -700,7 +726,10 @@ pub(crate) fn start_worker() {
     std::thread::spawn(|| loop {
         if let Ok(mut conn) = pool().get() {
             let _ = maintenance(&mut conn);
-            if let Ok(url) = std::env::var("LIYU_DELIVERY_WEBHOOK") {
+            if let Some(url) = std::env::var("LIYU_DELIVERY_WEBHOOK")
+                .ok()
+                .filter(|_| !test_fallback())
+            {
                 if url.starts_with("https://")
                     || (test_mode() && url.starts_with("http://127.0.0.1:"))
                 {
@@ -792,6 +821,26 @@ fn dispatch_one(conn: &mut PgConnection, url: &str) -> QueryResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_code_requires_explicit_opt_in_and_missing_provider_setting() {
+        for enabled in [false, true] {
+            for webhook in [
+                None,
+                Some(""),
+                Some("  "),
+                Some("https://provider.test/send"),
+            ] {
+                for token in [None, Some(""), Some("  "), Some("provider-token")] {
+                    let complete = webhook.is_some_and(|v| !v.trim().is_empty())
+                        && token.is_some_and(|v| !v.trim().is_empty());
+                    assert_eq!(
+                        use_fixed_code(enabled, webhook, token),
+                        enabled && !complete
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn normalization_preserves_email_aliases_and_rejects_bad_numbers() {
         assert_eq!(

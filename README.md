@@ -17,7 +17,7 @@ docker compose --env-file deploy/production.env -f compose.deploy.yaml pull
 docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --wait
 ```
 
-默认镜像标签为 `v0.1.1`，该版本 CI 发布完成后才可拉取。详细配置与核验步骤见部署指南。
+默认镜像标签为 `v0.1.2`，该版本 CI 发布完成后才可拉取。详细配置与核验步骤见部署指南。
 
 
 ## Run

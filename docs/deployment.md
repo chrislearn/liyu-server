@@ -131,7 +131,7 @@ cp deploy/production.env.example deploy/production.env
 chmod 600 deploy/production.env
 ```
 
-修改 POSTGRES_PASSWORD 和 LIYU_ADMIN_PASSWORD（建议 `openssl rand -hex 32` 生成），设置自己的管理员用户名；真实注册需要 LIYU_DELIVERY_WEBHOOK 与 LIYU_DELIVERY_TOKEN，协议见[联系方式发送说明](contact-delivery.md)。LIYU_IMAGE 默认 `ghcr.io/chrislearn/liyu-server:v0.1.1`，必须等该版本 CI 成功发布后拉取，也可替换为已验证的镜像固定摘要。默认 LIYU_PUBLIC_URL 为 `https://liyu.taidge.com`。
+修改 POSTGRES_PASSWORD 和 LIYU_ADMIN_PASSWORD（建议 `openssl rand -hex 32` 生成），设置自己的管理员用户名；真实注册需要 LIYU_DELIVERY_WEBHOOK 与 LIYU_DELIVERY_TOKEN，协议见[联系方式发送说明](contact-delivery.md)。LIYU_IMAGE 默认 `ghcr.io/chrislearn/liyu-server:v0.1.2`，必须等该版本 CI 成功发布后拉取，也可替换为已验证的镜像固定摘要。默认 LIYU_PUBLIC_URL 为 `https://liyu.taidge.com`。
 
 ```sh
 docker compose --env-file deploy/production.env -f compose.deploy.yaml config --quiet
@@ -144,7 +144,7 @@ curl --fail http://127.0.0.1:8787/health
 
 上述回环地址适用于 **Caddy 运行在宿主机**。如果你的 Caddy 本身在容器中，容器的 127.0.0.1 不指向宿主机；应把 Caddy 接入同一 Docker 网络并使用 `server:8787`，按你的现有代理环境配置，不要将数据库或明文后端端口直接暴露公网。
 
-Compose 强制 production 模式、关闭测试验证码、启用安全管理 Cookie。公网部署仍不包含真实支付或物流集成。更改已初始化数据库的 POSTGRES_PASSWORD 不会自动修改数据库用户密码，需协调数据库和服务端更新。环境文件、真实媒体、数据卷和备份不得提交 Git。
+Compose 强制 production 模式、关闭旧版 LIYU_TEST_DELIVERY 开发开关、启用安全管理 Cookie；新 LIYU_TEST_MODE 默认 false，固定验证码体验需显式开启。公网部署仍不包含真实支付或物流集成。更改已初始化数据库的 POSTGRES_PASSWORD 不会自动修改数据库用户密码，需协调数据库和服务端更新。环境文件、真实媒体、数据卷和备份不得提交 Git。
 
 小程序 1.0.36 默认域名与本节一致，无需额外 localhost 配置。若更换域名，必须从小程序可编辑源码同步修改服务地址和 network.hosts，然后发布新版本；不能修改已封装的 GitHub 发布包。
 
@@ -185,3 +185,9 @@ GitHub Actions 已固定到完整提交 SHA，Cargo 依赖使用锁文件；基�
 先更新 Cargo.toml 的 package.version 和 Cargo.lock，提交后推送一致的版本标签，如 `git tag v0.1.0 && git push origin v0.1.0`。标签 CI 校验版本、运行测试、发布双架构镜像，然后自动创建 Release；任一前置任务失败均不发布 Release。main 推送继续发布 main 镜像，不创建版本 Release。
 
 下载 ZIP 后解压，按照本指南配置环境。线上将 LIYU_IMAGE 设置为发布页提供的版本标签或固定摘要，再执行 Compose pull 与 up。源码 ZIP 也包含本地构建所需文件。不要移动已发布的版本标签；升级应使用新的版本号。
+
+## 无发送服务时的固定验证码体验
+
+设置 `LIYU_TEST_MODE=true`：当 `LIYU_DELIVERY_WEBHOOK` 或 `LIYU_DELIVERY_TOKEN` 任一未设置、为空或只有空白时，验证码固定为 `123456`，不入邮件/短信验证码投递队列，投递 worker 暂停外部发送。授权网页明确显示测试验证码；仍需先申请 challenge，十分钟有效期、错误尝试次数及一次性使用规则不变。注册和邮箱/手机号修改使用同一规则。
+
+默认 `LIYU_TEST_MODE=false`，不会因缺少供应商而自动接受固定码。开关为 true 但两个发送配置均完整时，继续使用随机验证码和真实发送。该开关可用于 production 部署下的体验，独立于只供开发环境使用的 LIYU_TEST_DELIVERY；HTTPS、安全 Cookie 和生产账号保护继续有效。固定码体验不能证明用户实际持有邮箱或手机号，体验期间不要使用真实业务数据；正式验证需关闭此开关并配置发送服务。

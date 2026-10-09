@@ -70,3 +70,9 @@ LiYu 可手工新增／修改电话和邮箱；macOS Contacts 导入只在用户
 测试：`cargo test --all-targets -- --test-threads=8`；`tests/contact_delivery_e2e.py` 运行真实隔离 PostgreSQL 与本地 HTTP mock，涵盖非好友送礼、待领取注册归属、绑定归属、通知权限、失败重试、验证码重放、重复支付和退款；`tests/contact_provider_e2e.py` 用本地证书校验 HTTPS 验证正式随机码通道。测试要求数据库名包含 `contact_test`，禁止使用业务数据库。前端覆盖四种窗口宽度下的控件动作、导入确认／取消及联系方式选择。邀请页已进行浏览器视觉检查；系统通讯录权限交互和真实供应商收件箱尚未端到端验证。
 
 购物车入口与 REST API 已移除；历史 `cart_items` 表暂留作升级兼容，服务不再访问它，也未删除旧记录。已存在的订单继续可查询和支付。
+
+## 无发送服务时的固定验证码体验
+
+设置 `LIYU_TEST_MODE=true`：当 `LIYU_DELIVERY_WEBHOOK` 或 `LIYU_DELIVERY_TOKEN` 任一未设置、为空或只有空白时，验证码固定为 `123456`，不入邮件/短信验证码投递队列，投递 worker 暂停外部发送。授权网页明确显示测试验证码；仍需先申请 challenge，十分钟有效期、错误尝试次数及一次性使用规则不变。注册和邮箱/手机号修改使用同一规则。
+
+默认 `LIYU_TEST_MODE=false`，不会因缺少供应商而自动接受固定码。开关为 true 但两个发送配置均完整时，继续使用随机验证码和真实发送。该开关可用于 production 部署下的体验，独立于只供开发环境使用的 LIYU_TEST_DELIVERY；HTTPS、安全 Cookie 和生产账号保护继续有效。固定码体验不能证明用户实际持有邮箱或手机号，体验期间不要使用真实业务数据；正式验证需关闭此开关并配置发送服务。

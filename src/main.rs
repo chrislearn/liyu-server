@@ -298,7 +298,7 @@ async fn authenticate_with_ttl(req: &mut Request, res: &mut Response, is_registe
     res.render(Json(json!({
         "token": token,
         "expires_in_seconds": ttl,
-        "test_delivery":contact_delivery::test_mode(),
+        "test_delivery":contact_delivery::verification_test_mode(),
         "user": {"id": uid, "identifier": identity, "display_name": name}
     })));
 }
