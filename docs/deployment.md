@@ -4,7 +4,7 @@
 
 LIYU-MINI → 标准 `net.http_request` / WebReader → HTTPS Caddy → LIYU 服务端 → PostgreSQL。无需 LIYU 专用宿主，也无需克隆原生 LIYU。AI 使用设备提供的标准模型能力；本地演示无需任何后端。
 
-需要 Docker Engine/Desktop 和 Docker Compose v2 或更新版本。执行下列命令的位置均为本仓库根目录。Compose 包含数据库、服务端、Caddy，镜像包含编译好的管理后台、迁移与商品示例图片。数据库和上传媒体分别保存到命名卷，服务端以非 root 用户运行，数据库及服务端端口不对外发布。
+需要 Docker Engine/Desktop 和 Docker Compose v2 或更新版本。执行下列命令的位置均为本仓库根目录。本地 Compose 包含数据库、服务端、Caddy；正式 compose.deploy.yaml 只包含数据库和服务端，镜像包含编译好的管理后台、迁移与商品示例图片。数据库和上传媒体分别保存到命名卷，服务端以非 root 用户运行，数据库及服务端端口不对外发布。
 
 **当前支付、物流与折现是测试业务，余额不是可提现资金。部署到公网不会自动获得真实支付、短信或物流能力。**真实邮箱/手机号验证必须配置发送服务，协议见[联系方式发送说明](contact-delivery.md)。不要将本地测试环境暴露到公网。
 
@@ -104,7 +104,7 @@ https://liyu.localhost:8443 {
 
 ## 3. GitHub CI 与镜像
 
-[工作流](../.github/workflows/ci.yml) 在 PR、main 推送、`v*` 标签和手动运行时执行：Rust 格式、Clippy、编译、单元测试，以及真实数据库上的网页授权、心愿单和双方约定状态测试。测试通过后构建 amd64/arm64 容器；PR 只构建，main/标签使用 `GITHUB_TOKEN` 发布到 GHCR，无需配置仓库密码。需在仓库 Actions 设置允许执行工作流及写入 Packages。
+[工作流](../.github/workflows/ci.yml) 在 PR、main 推送、`v*` 标签和手动运行时执行：Rust 格式、Clippy、编译、单元测试，以及真实数据库上的网页授权、心愿单和双方约定状态测试。测试通过后构建 amd64/arm64 容器；PR 只构建，main/标签使用 `GITHUB_TOKEN` 发布到 GHCR，无需配置仓库密码。需在仓库 Actions 设置允许执行工作流及写入 Packages。版本 Release 的创建还需 contents 写权限。
 
 本仓库预期镜像地址是 `ghcr.io/chrislearn/liyu-server`：
 
@@ -122,40 +122,31 @@ docker build -t liyu-server:local .
 
 然后将配置中的 `LIYU_IMAGE` 改成 `liyu-server:local`，跳过 `pull server`。Dockerfile 会编译后台，不依赖本地已有的 `web/dist` 或 `target`。
 
-## 4. 公网部署
+## 4. 公网部署：由已有 Caddy 反代
 
-准备一台有 Docker 的服务器和自己的域名，如 `liyu.example.com`。将 DNS A/AAAA 指向实际服务器；没有可用 IPv6 时不要留下错误 AAAA。允许入站 TCP 80/443（UDP 443 可选，用于 HTTP/3），避免与其他代理抢占端口。Caddy 自动申请与续期公开证书，CA 校验需要域名正确解析且服务器可以被访问。
+实际域名为 **liyu.taidge.com**，公网 HTTPS 和证书由运营者自己的 Caddy 配置。正式部署使用根目录的 **compose.deploy.yaml**，其中只有 PostgreSQL 和服务端，无 Caddy 容器、证书卷或 80/443 端口。服务端仅绑定宿主机 `127.0.0.1:8787`，数据库不发布端口。
 
 ```sh
 cp deploy/production.env.example deploy/production.env
 chmod 600 deploy/production.env
 ```
 
-必须逐项修改：
-
-| 配置 | 设置方式 |
-| --- | --- |
-| `LIYU_IMAGE` | Packages 中确实存在且验证过的镜像标签或摘要 |
-| `POSTGRES_PASSWORD` | `openssl rand -hex 32` 生成的随机值；使用 hex 避免数据库 URL 转义问题 |
-| `LIYU_DOMAIN` | 域名本身，不含协议、路径或端口 |
-| `LIYU_PUBLIC_URL` | 与该域名对应的 `https://...`，不带末尾斜线 |
-| `ACME_EMAIL` | 可接收证书通知的真实邮箱 |
-| `LIYU_ADMIN_USERNAME` / `LIYU_ADMIN_PASSWORD` | 自己的管理员账号及随机强密码，替换所有 REPLACE 字样 |
-| `LIYU_DELIVERY_WEBHOOK` / `LIYU_DELIVERY_TOKEN` | 自己的邮件/短信发送桥及认证令牌，按联系方式发送说明实现 |
-| `LIYU_ENV` / `LIYU_TEST_DELIVERY` | 保持 `production` / `false` |
-
-环境文件含秘密，不要提交 Git。更改已初始化数据库的 `POSTGRES_PASSWORD` 不会自动修改数据库用户密码；需在数据库中同步修改并协调服务端连接。
+修改 POSTGRES_PASSWORD 和 LIYU_ADMIN_PASSWORD（建议 `openssl rand -hex 32` 生成），设置自己的管理员用户名；真实注册需要 LIYU_DELIVERY_WEBHOOK 与 LIYU_DELIVERY_TOKEN，协议见[联系方式发送说明](contact-delivery.md)。LIYU_IMAGE 默认 `ghcr.io/chrislearn/liyu-server:v0.1.1`，必须等该版本 CI 成功发布后拉取，也可替换为已验证的镜像固定摘要。默认 LIYU_PUBLIC_URL 为 `https://liyu.taidge.com`。
 
 ```sh
-docker compose --env-file deploy/production.env config --quiet
-docker compose --env-file deploy/production.env pull
-docker compose --env-file deploy/production.env up -d --wait
-curl --fail https://liyu.example.com/health
+docker compose --env-file deploy/production.env -f compose.deploy.yaml config --quiet
+docker compose --env-file deploy/production.env -f compose.deploy.yaml pull
+docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --wait
+curl --fail http://127.0.0.1:8787/health
 ```
 
-用自己的域名替换最后一行，打开 `https://liyu.example.com/admin` 确认后台可用，测试真实验证码送达、注册、浏览器授权、退出与令牌撤销。生产数据库从全新卷开始；不要导入含开发账号、固定密码、测试余额和个人资料的开发数据库。迁移自动执行，生产保护不等于清理所有开发数据。
+已有 Caddy 对 `liyu.taidge.com` 反代到 **127.0.0.1:8787**，包括 `/api/v1`、`/authorize`、`/admin` 和商品图片路径，不能只代理 API。配置完成后验证 `curl --fail https://liyu.taidge.com/health`，再打开 `/admin` 和小程序网页登录，核验真实验证码送达、注册与会话撤销。不要在反代访问日志中记录 Authorization 头、请求体、验证码或会话令牌。
 
-小程序也必须配置同一个域名：在 `liyu-mini` 中执行 `python3 scripts/configure-backend.py https://liyu.example.com`，然后按其 README 重新校验、打包。脚本同步修改服务地址和 `network.hosts`，不会申请专用能力。不能只改 Caddy 或只改允许列表。
+上述回环地址适用于 **Caddy 运行在宿主机**。如果你的 Caddy 本身在容器中，容器的 127.0.0.1 不指向宿主机；应把 Caddy 接入同一 Docker 网络并使用 `server:8787`，按你的现有代理环境配置，不要将数据库或明文后端端口直接暴露公网。
+
+Compose 强制 production 模式、关闭测试验证码、启用安全管理 Cookie。公网部署仍不包含真实支付或物流集成。更改已初始化数据库的 POSTGRES_PASSWORD 不会自动修改数据库用户密码，需协调数据库和服务端更新。环境文件、真实媒体、数据卷和备份不得提交 Git。
+
+小程序 1.0.36 默认域名与本节一致，无需额外 localhost 配置。若更换域名，必须从小程序可编辑源码同步修改服务地址和 network.hosts，然后发布新版本；不能修改已封装的 GitHub 发布包。
 
 ## 5. 数据持久化、升级与排障
 
@@ -163,13 +154,13 @@ curl --fail https://liyu.example.com/health
 
 ```sh
 mkdir -p backups
-docker compose --env-file deploy/production.env exec -T db pg_dump -U liyu -d liyu -Fc > backups/liyu.dump
-docker compose --env-file deploy/production.env cp server:/data backups/media
+docker compose --env-file deploy/production.env -f compose.deploy.yaml exec -T db pg_dump -U liyu -d liyu -Fc > backups/liyu.dump
+docker compose --env-file deploy/production.env -f compose.deploy.yaml cp server:/data backups/media
 ```
 
 恢复应先停写入业务，在独立恢复环境创建空数据库，使用 `pg_restore -U liyu -d liyu` 导入，将媒体恢复到 `/data` 并保持 UID 10001 可写，再启动服务验证。不要覆盖唯一的线上卷。备份包含个人资料，限制访问并安全保存。
 
-升级：修改 `LIYU_IMAGE` 为新版本，`docker compose --env-file deploy/production.env pull server`，再 `up -d --wait`。迁移可能使旧程序不兼容；回退程序前检查迁移，必要时使用升级前的数据库与媒体备份。无需删除卷。
+升级：修改 `LIYU_IMAGE` 为新版本，`docker compose --env-file deploy/production.env -f compose.deploy.yaml pull server`，再 `docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --wait`。迁移可能使旧程序不兼容；回退程序前检查迁移，必要时使用升级前的数据库与媒体备份。无需删除卷。
 
 - `server` 不健康：查看服务日志与 DB 健康状态，检查密码、迁移及生产保护设置。
 - 管理后台 503：源码方式未构建后台；容器内应包含 `/app/web/dist`，确认拉取的是此 Dockerfile 构建的镜像。
