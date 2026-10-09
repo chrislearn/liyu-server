@@ -142,6 +142,8 @@ decide('confirm',c,1,404)
 call(schedule, token=None, status=401)
 decide('confirm',b)
 assert call(schedule,token=a)['planned_on']==call(schedule,token=b)['planned_on']=='2028-02-29'
+calendar_time=call(schedule,token=a)
+assert calendar_time['start_ms']==1835395200000 and calendar_time['end_ms']==1835481600000
 propose('2028-03-02')
 assert call(schedule,token=b)['planned_on']=='2028-02-29'
 decide('cancel',a)

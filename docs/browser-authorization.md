@@ -1,6 +1,6 @@
-# 网页授权
+# 旧版网页授权与联系方式验证
 
-`liyu-mini` 使用标准 HTTPS 与 WebReader，不依赖专用 `liyu` 宿主服务。
+此协议保留给旧版客户端及联系方式验证。LIYU-MINI 1.0.38 登录已改为[宿主 PKCE](host-pkce.md)，不会轮询领取应用令牌。
 
 1. 应用向 `POST /api/v1/browser-authorizations` 提交 `{"purpose":"login"}`。修改联系方式使用 `email` 或 `phone`，并携带当前应用的 Bearer 会话。
 2. 返回 `id`、`poll_key`、`browser_path`、`interval: 3` 和 `expires_in_seconds: 300`。应用在 WebReader 打开后端 `browser_path`；网页密钥在 URL fragment 中，页面立即从地址栏移除它，不进入服务器访问日志。应用保留独立的 `poll_key`，网页不持有它。

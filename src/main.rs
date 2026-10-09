@@ -10,6 +10,7 @@ mod demo_logistics;
 mod friend_tags;
 mod fulfillment;
 mod gifting;
+mod host_auth;
 mod management;
 mod occasion_reminders;
 mod profile;
@@ -442,6 +443,7 @@ async fn main() {
             .expect("revoke disabled account sessions");
         }
         purchase_calendar::ensure_schema(&mut conn).expect("upgrade purchase and calendar schema");
+        host_auth::ensure_schema(&mut conn).expect("upgrade host authorization schema");
         admin::bootstrap(&mut conn).expect("initialize administrator");
     }
     DB.set(db)
@@ -453,6 +455,7 @@ async fn main() {
     let router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(browser_auth::routes())
+        .push(host_auth::routes())
         .push(admin::routes())
         .push(management::routes())
         .push(benefits::routes())

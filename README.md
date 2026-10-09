@@ -2,7 +2,7 @@
 
 Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, current gaps, API inventory and privacy matrix are in [todos/app-api.md](todos/app-api.md). This backend keeps test payment and carrier flows; contact gifting now has verified identities and a configurable SMS/email delivery bridge. See [contact delivery](docs/contact-delivery.md). Bind to loopback by default; fixed test credentials must never be exposed publicly.
 
-LIYU-MINI now signs in through a server-owned browser authorization page and calls business APIs over standard HTTPS, without a custom LIYU host service. See [browser authorization](docs/browser-authorization.md) for protocol, expiry, cancellation and testing.
+LIYU-MINI 1.0.38 uses host-managed backend PKCE and declared business operations. See [host PKCE](docs/host-pkce.md) for credentials, rotation, migration and platform limits. The [browser authorization](docs/browser-authorization.md) protocol remains for legacy clients and contact verification.
 
 数据范围、供应商传输、会话撤销及删除边界见[服务端隐私说明](PRIVACY.md)。
 
@@ -62,7 +62,7 @@ $headers = @{Authorization="Bearer $($refreshed.token)"}
 Invoke-RestMethod "$base/api/v1/auth/logout" -Method Post -Headers $headers
 ```
 
-Legacy native LIYU integrations may use `LIYU_API_URL`, `LIYU_IDENTIFIER`, and `LIYU_AUTH_TOKEN`. LIYU-MINI instead calls standard HTTPS directly and obtains its own session through browser authorization. It never falls back to demo data on network failure; local demo is an explicit separate entry. The old whole-state endpoint permanently returns `410`: its JSON would contain private gift answers, addresses and money entries. Online workflows use the domain APIs below.
+Legacy native LIYU integrations may use `LIYU_API_URL`, `LIYU_IDENTIFIER`, and `LIYU_AUTH_TOKEN`. LIYU-MINI instead connects through standard host auth, which owns its PKCE session and injects credentials into declared operations. It never falls back to demo data on network failure; local demo is an explicit separate entry. The old whole-state endpoint permanently returns `410`: its JSON would contain private gift answers, addresses and money entries. Online workflows use the domain APIs below.
 
 ## Storage and connection pool
 

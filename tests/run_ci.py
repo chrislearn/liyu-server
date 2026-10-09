@@ -16,6 +16,7 @@ parts = urlsplit(admin_dsn)
 port = int(os.environ.get('LIYU_CI_PORT', '18788'))
 results = []
 for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
+                      ('host_auth', 'host_auth_e2e.py'),
                       ('wishlist', 'wishlist_drafts_e2e.py'),
                       ('contract', 'contract_marks_e2e.py'),
                       ('purchase', 'purchase_calendar_e2e.py'),

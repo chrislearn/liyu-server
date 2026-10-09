@@ -1,6 +1,6 @@
 [package]
 name = "liyu-server"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -17,3 +17,5 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 # Real image decoding for avatar validation; only the formats we accept.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

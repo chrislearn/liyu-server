@@ -148,16 +148,16 @@ async fn approve(req: &mut Request, res: &mut Response) {
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let result = conn.transaction::<bool, diesel::result::Error, _>(|conn| {
+    let result = conn.transaction::<Option<Option<String>>, diesel::result::Error, _>(|conn| {
         let Some(row) = read(conn, &id, &hash_secret(&secret.browser_key), true)? else {
-            return Ok(false);
+            return Ok(None);
         };
         if !valid(&row) || row["owner_id"].as_i64().is_some_and(|owner| owner != uid) {
-            return Ok(false);
+            return Ok(None);
         }
         // Revalidate inside the transaction, so revoked/expired browser tokens cannot approve.
         if crate::session_owner(conn, &session_hash)? != Some(uid) {
-            return Ok(false);
+            return Ok(None);
         }
         diesel::sql_query(
             "UPDATE browser_authorizations SET state='approved',approved_user_id=$2 WHERE id=$1",
@@ -166,11 +166,11 @@ async fn approve(req: &mut Request, res: &mut Response) {
         .bind::<BigInt, _>(uid)
         .execute(conn)?;
         crate::revoke_session(conn, &session_hash)?;
-        Ok(true)
+        Ok(Some(crate::host_auth::approved(conn, &id, uid)?))
     });
     match result {
-        Ok(true) => res.render(Json(json!({"ok":true}))),
-        Ok(false) => error(
+        Ok(Some(redirect)) => res.render(Json(json!({"ok":true,"redirect_uri":redirect}))),
+        Ok(None) => error(
             res,
             StatusCode::CONFLICT,
             "authorization unavailable or wrong account",
