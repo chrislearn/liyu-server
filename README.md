@@ -10,14 +10,14 @@ LIYU-MINI now signs in through a server-owned browser authorization page and cal
 
 完整步骤见[部署指南](docs/deployment.md)：Docker Compose 一键启动 PostgreSQL、服务端和 Caddy，本地内部 HTTPS、线上域名及证书、GHCR 镜像发布、验证服务、升级与备份。镜像包含管理后台与商品图片，无需 LIYU 专用宿主。
 
-实际线上域名为 `liyu.taidge.com`。使用 [compose.deploy.yaml](compose.deploy.yaml) 部署数据库和服务端，不包含 Caddy；已有宿主机 Caddy 反代到 `127.0.0.1:8787`。复制 `deploy/production.env.example`、填写数据库/管理员密码及邮件短信桥后执行：
+实际线上入口为 `https://liyu.taidge.com`，健康检查为 `/health`，管理后台为 `/admin`；2026-10-09 公网健康检查返回 HTTP 200。使用 [compose.deploy.yaml](compose.deploy.yaml) 部署数据库和服务端，不包含 Caddy；已有宿主机 Caddy 反代到 `127.0.0.1:8787`。复制 `deploy/production.env.example`、填写数据库/管理员密码及邮件短信桥后执行：
 
 ```sh
 docker compose --env-file deploy/production.env -f compose.deploy.yaml pull
 docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --wait
 ```
 
-默认镜像标签为 `v0.1.2`，该版本 CI 发布完成后才可拉取。详细配置与核验步骤见部署指南。
+默认镜像标签为 `v0.1.2`，已发布并包含固定验证码体验开关。详细配置与核验步骤见部署指南。
 
 
 ## Run

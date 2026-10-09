@@ -191,3 +191,31 @@ GitHub Actions 已固定到完整提交 SHA，Cargo 依赖使用锁文件；基�
 设置 `LIYU_TEST_MODE=true`：当 `LIYU_DELIVERY_WEBHOOK` 或 `LIYU_DELIVERY_TOKEN` 任一未设置、为空或只有空白时，验证码固定为 `123456`，不入邮件/短信验证码投递队列，投递 worker 暂停外部发送。授权网页明确显示测试验证码；仍需先申请 challenge，十分钟有效期、错误尝试次数及一次性使用规则不变。注册和邮箱/手机号修改使用同一规则。
 
 默认 `LIYU_TEST_MODE=false`，不会因缺少供应商而自动接受固定码。开关为 true 但两个发送配置均完整时，继续使用随机验证码和真实发送。该开关可用于 production 部署下的体验，独立于只供开发环境使用的 LIYU_TEST_DELIVERY；HTTPS、安全 Cookie 和生产账号保护继续有效。固定码体验不能证明用户实际持有邮箱或手机号，体验期间不要使用真实业务数据；正式验证需关闭此开关并配置发送服务。
+
+## 已上线地址与常见配置问题
+
+当前线上入口为 **https://liyu.taidge.com**；业务 API 在 `/api/v1`，管理后台在 `/admin`。2026-10-09 从公网检查 `/health` 返回 HTTP 200 和 `{"status":"ok"}`，这是健康检查证据，不代表真实发送服务或全部业务验收。
+
+环境文件可放在 `deploy/production.env`，也可像实际服务器一样放在根目录 `./production.env`。后者启动命令为：
+
+```sh
+docker compose --env-file ./production.env -f compose.deploy.yaml pull
+docker compose --env-file ./production.env -f compose.deploy.yaml up -d --wait
+```
+
+使用固定验证码体验时，在所选环境文件中填写：
+
+```dotenv
+LIYU_TEST_MODE=true
+LIYU_DELIVERY_WEBHOOK=
+LIYU_DELIVERY_TOKEN=
+```
+
+**--env-file 不会自动将全部变量传入容器。** compose.deploy.yaml 的 server.environment 必须包含 `LIYU_TEST_MODE: ${LIYU_TEST_MODE:-false}`；旧版 Compose 文件需同步更新。修改后重建容器，单纯 restart 不更新环境变量：
+
+```sh
+docker compose --env-file ./production.env -f compose.deploy.yaml up -d --force-recreate --wait server
+docker compose --env-file ./production.env -f compose.deploy.yaml exec server printenv LIYU_TEST_MODE
+```
+
+最后一条应输出 true。镜像 v0.1.2 已包含该功能；拉取新镜像仍需通过 up 更新运行中的容器。环境文件和 Compose 文件都使用显式路径，避免在没有默认 compose.yaml 的目录执行 docker compose pull 时出现找不到配置的错误。
