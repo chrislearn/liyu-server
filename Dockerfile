@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1
 ARG RUST_IMAGE=rust:1-bookworm
+# Cargo registry cache is shared across stages/architectures. Serialize writers
+# to avoid concurrent crate extraction (.cargo-ok File exists).
 # WebAssembly assets are architecture independent; build once on the runner.
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS ui
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends clang lld pkg-config libssl-dev python3 && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo install dioxus-cli --version 0.7.10 --locked
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry cargo install dioxus-cli --version 0.7.10 --locked
 COPY admin-ui/ admin-ui/
 COPY scripts/build-admin.py scripts/build-admin.py
 COPY web/admin.css web/admin.css
-RUN --mount=type=cache,target=/usr/local/cargo/registry python3 scripts/build-admin.py
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry python3 scripts/build-admin.py
 
 FROM ${RUST_IMAGE} AS server
 WORKDIR /app
@@ -18,7 +20,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY migrations/ migrations/
 COPY web/ web/
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release --locked
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libpq5 ca-certificates curl && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home liyu && mkdir /data && chown liyu:liyu /data
