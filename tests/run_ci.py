@@ -2,6 +2,7 @@
 """Run each destructive integration suite on its own disposable database."""
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,12 @@ admin_dsn = os.environ['DATABASE_URL']
 parts = urlsplit(admin_dsn)
 port = int(os.environ.get('LIYU_CI_PORT', '18788'))
 results = []
+# Never accept another process's health response or mutate its database.
+with socket.socket() as probe:
+    try:
+        probe.bind(('127.0.0.1', port))
+    except OSError as exc:
+        raise RuntimeError(f'refusing to run integration tests on occupied port {port}') from exc
 for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
                       ('host_auth', 'host_auth_e2e.py'),
                       ('wishlist', 'wishlist_drafts_e2e.py'),
@@ -34,14 +41,15 @@ for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
                    LIYU_DELIVERY_TOKEN='' if prefix == 'fallback_no_token' else 'unused-test-token')
     process = None
     try:
-        with tempfile.TemporaryFile() as log:
+        with tempfile.TemporaryDirectory() as log_dir, (Path(log_dir) / 'server.log').open('w+b') as log:
             process = subprocess.Popen([str(root / 'target/debug/liyu-server')], cwd=root, env=env, stdout=log, stderr=log)
             for _ in range(60):
                 if process.poll() is not None:
                     break
                 try:
                     with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=1) as response:
-                        if response.status == 200:
+                        if (response.status == 200 and process.poll() is None
+                                and f'LiYu test API listening on 127.0.0.1:{port}'.encode() in Path(log.name).read_bytes()):
                             break
                 except OSError:
                     time.sleep(1)
