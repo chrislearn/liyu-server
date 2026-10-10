@@ -37,6 +37,13 @@ first=call('/oauth/token',grant,form=True);assert first['token_type']=='Bearer' 
 call('/oauth/token',grant,form=True,status=400)
 identity=call('/oauth/me',token=first['access_token'],method='GET');assert identity['sub'] and identity['label']
 r=call('/api/v1/host/read?'+urllib.parse.urlencode({'path':'/catalog?limit=50'}),token=first['access_token'],method='GET');assert r['status']==200 and r['body']['items']
+# Exercise the exact encoded path used by the mini-app's host-managed read transport.
+options=call('/api/v1/host/read?'+urllib.parse.urlencode({'path':'/catalog/search-options'}),token=first['access_token'],method='GET')
+assert options['status']==200 and options['body']['tool']['name']=='catalog_search'
+filter={'max_price_cents':3000,'allowed_kinds':['咖啡'],'excluded_kinds':['奶茶'],'delivery':'any'}
+path='/catalog/search?'+urllib.parse.urlencode({'filter':json.dumps(filter,ensure_ascii=False),'q':'','cursor':-1,'limit':20})
+result=call('/api/v1/host/read?'+urllib.parse.urlencode({'path':path}),token=first['access_token'],method='GET')
+assert result['status']==200 and result['body']['eligible_total']==0 and result['body']['applied']==filter
 for path in ['/oauth/token','/me/../auth/login','//evil.test','/me/%2e%2e/auth']:
  call('/api/v1/host/read?'+urllib.parse.urlencode({'path':path}),token=first['access_token'],method='GET',status=400)
 call('/api/v1/host/post',{'path':'/browser-authorizations','body':{'purpose':'login'}},first['access_token'],status=400)

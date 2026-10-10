@@ -1,21 +1,22 @@
 [package]
 name = "liyu-server"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
+rust-version = "1.94"
 license = "Apache-2.0"
 
 [dependencies]
-argon2 = "0.5.3"
-dotenvy = "0.15"
-diesel = { version = "2.3", features = ["postgres", "r2d2", "serde_json", "uuid"] }
-diesel_migrations = "2.3"
-salvo = { version = "0.84", features = ["http1", "server"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-uuid = { version = "1", features = ["v4"] }
+argon2 = "0.6.0"
+dotenvy = "0.15.7"
+diesel = { version = "2.3.14", features = ["postgres", "r2d2", "serde_json", "uuid"] }
+diesel_migrations = "2.3.2"
+salvo = { version = "1.0.1", features = ["http1", "server", "oapi"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+uuid = { version = "1.28.0", features = ["v4"] }
 # Real image decoding for avatar validation; only the formats we accept.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }

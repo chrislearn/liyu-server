@@ -270,7 +270,10 @@ fn normalized_answer(raw: &str) -> String {
 fn answer_digest(id: i64, raw: &str) -> String {
     let pepper = std::env::var("LIYU_ANSWER_PEPPER").unwrap_or_else(|_| "liyu-local-demo".into());
     let bytes = format!("{pepper}:{id}:{}", normalized_answer(raw));
-    format!("{:x}", Sha256::digest(bytes.as_bytes()))
+    Sha256::digest(bytes.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn matches_sender(guess: &str, name: &str, nickname: Option<&str>) -> bool {

@@ -35,8 +35,8 @@ pub(crate) struct ProductRow {
     is_active: bool,
 }
 
-#[derive(Serialize)]
-struct Product {
+#[derive(Serialize, salvo::oapi::ToSchema)]
+pub(crate) struct Product {
     id: i32,
     name: String,
     category: String,

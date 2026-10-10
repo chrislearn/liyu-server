@@ -177,3 +177,17 @@ The additive `20260930030000_wishlist_drafts` migration marks existing lists as 
 POST `/calendar-export` 创建五分钟导出页，随机密钥在 URL fragment 中，下载时重新核验原会话、双方关系及已确认日期。下载一次后密钥失效。生成 UTF-8/CRLF iCalendar 全天事件，可手动导入日历；无对方联系方式、无自动邀请、无系统日历读写或自动同步。改期或清除后需用户自行核对已导入事件。
 
 此项目按 [Apache License 2.0](LICENSE) 授权，Cargo 元数据为 Apache-2.0。
+
+## AI 只读商品工具（v0.1.5）
+
+后端使用 Salvo 1.0.1（Rust >=1.94），后端直接依赖于2026-10-10升级到 crates.io 最新稳定版，锁定在 Cargo.lock。Argon2 0.6 保留既有PHC密码验证，SHA-256十六进制表示保持不变；reqwest升级0.13.5采用rustls。管理前端gloo-net升级0.7.0并更新锁文件，Dioxus保留最新稳定0.7.10，未采用0.8 alpha。
+
+- `GET /api/v1/catalog/search-options`：精确商品种类和允许的只读工具说明。
+- `GET /api/v1/catalog/search?filter=<JSON>&q=<文字>&cursor=-1&limit=20`：只查询在售且有库存商品。filter包含max_price_cents（分，0不限）、allowed_kinds、excluded_kinds、delivery（any/physical/electronic）。未知、矛盾过滤返回400，不静默放宽。
+- `GET /api/v1/catalog/openapi`：由Salvo端点注解生成上述工具的OpenAPI，不代表所有业务接口都已注解。
+
+`eligible_total`是整个目录在当前过滤下的符合数，忽略软关键词和游标；`total_matches`再叠加文字查询，忽略游标。只有eligible_total=0可以证明当前过滤无商品；单页或关键词空结果不够。分页每页最多20件，没有原先前50件限制，价格、库存、目录摘要和计数在同一个只读可重复读事务内返回。q按字面匹配，SQL参数绑定，不能调用支付或写入。
+
+应用自动理解原条件，精确范围无结果时可另发备选范围查询，但必须保持原条件并显示差异；接口仍严格执行每次提交的filter。商品资料无法验证的条件不宣称满足。应用不接受模型生成任意网址、SQL或写操作。
+
+核验：`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`及`DATABASE_URL=<本地测试集群postgres> python3 tests/run_ci.py`。新增catalog_search_e2e.py使用专属一次性数据库验证OpenAPI、过滤、零结果证据、库存、字面查询和超过50件的分页。源码升级不表示公网已经部署。

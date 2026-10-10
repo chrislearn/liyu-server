@@ -3,6 +3,7 @@ mod avatar;
 mod benefits;
 mod browser_auth;
 mod catalog;
+mod catalog_search;
 mod commerce;
 mod config;
 mod contact_delivery;
@@ -73,7 +74,10 @@ fn bearer(req: &Request) -> Option<&str> {
 }
 
 fn hash_secret(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn new_session_token() -> String {
@@ -219,12 +223,10 @@ async fn authenticate_with_ttl(req: &mut Request, res: &mut Response, is_registe
             } else if !(contact_delivery::test_mode() && body.code.as_deref() == Some(TEST_CODE)) {
                 return Ok(None);
             }
-            let salt =
-                argon2::password_hash::SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes())
-                    .unwrap();
+            let salt = uuid::Uuid::new_v4();
             use argon2::PasswordHasher;
             let password = argon2::Argon2::default()
-                .hash_password(body.password.as_bytes(), &salt)
+                .hash_password_with_salt(body.password.as_bytes(), salt.as_bytes())
                 .unwrap()
                 .to_string();
             let uid = diesel::insert_into(users)
@@ -272,7 +274,7 @@ async fn authenticate_with_ttl(req: &mut Request, res: &mut Response, is_registe
         .is_ok();
     use argon2::PasswordVerifier;
     let password_ok = if stored_hash.starts_with("$argon2") {
-        argon2::password_hash::PasswordHash::new(&stored_hash).is_ok_and(|hash| {
+        argon2::password_hash::phc::PasswordHash::new(&stored_hash).is_ok_and(|hash| {
             argon2::Argon2::default()
                 .verify_password(body.password.as_bytes(), &hash)
                 .is_ok()
@@ -468,6 +470,7 @@ async fn main() {
         .push(Router::with_path("api/v1").push(avatar::routes()))
         .push(fulfillment::routes())
         .push(commerce::routes())
+        .push(catalog_search::routes())
         .push(catalog::routes())
         .push(wishlist::routes())
         .push(friend_tags::routes())
