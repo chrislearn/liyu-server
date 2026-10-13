@@ -19,6 +19,8 @@ docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --w
 
 部署时必须显式设置 `LIYU_IMAGE` 为已验证的发布镜像／固定摘要或本地构建镜像。小程序1.0.45需要本仓库0.1.6分页接口；当前0.1.6源码更新尚未发布，旧镜像不能视为具备这些接口。详细配置与核验步骤见部署指南。
 
+main 镜像构建成功后同时更新 `:main`、`:latest` 和 `:sha-<完整提交>` 标签。使用 `latest` 的部署需先 pull，再重新创建服务容器；核对 `/health` 的 `version` / `git_hash` 和查询接口后才算更新完成。
+
 
 ## Run
 

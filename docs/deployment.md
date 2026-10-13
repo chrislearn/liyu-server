@@ -111,6 +111,7 @@ https://liyu.localhost:8443 {
 本仓库预期镜像地址是 `ghcr.io/chrislearn/liyu-server`：
 
 - main：`ghcr.io/chrislearn/liyu-server:main`。
+- latest：`ghcr.io/chrislearn/liyu-server:latest`，与成功构建的 main 同步更新；拉取后仍需重新创建服务容器。
 - `v1.2.3` 标签：`ghcr.io/chrislearn/liyu-server:v1.2.3`。
 - 提交：`ghcr.io/chrislearn/liyu-server:sha-<完整提交 SHA>`。
 
