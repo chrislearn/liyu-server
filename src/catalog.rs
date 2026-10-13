@@ -136,15 +136,15 @@ async fn list(req: &mut Request, res: &mut Response) {
         .bind::<BigInt, _>(limit + 1)
         .load::<ProductRow>(&mut conn);
     match rows {
-        Ok(mut rows) => {
-            let has_more = rows.len() as i64 > limit;
-            rows.truncate(limit as usize);
-            let next_cursor = if has_more {
-                rows.last().map(|p| p.id.to_string())
-            } else {
-                None
-            };
-            res.render(Json(json!({"items": rows.into_iter().map(Product::from).collect::<Vec<_>>(), "next_cursor": next_cursor})));
+        Ok(rows) => {
+            let values: Vec<_> = rows
+                .into_iter()
+                .map(|row| serde_json::to_value(Product::from(row)).unwrap())
+                .collect();
+            match crate::pagination::Page::bounded(&values, limit as usize, "id") {
+                Ok(page) => res.render(Json(page)),
+                Err(message) => fail(res, StatusCode::PAYLOAD_TOO_LARGE, message),
+            }
         }
         Err(_) => fail(
             res,

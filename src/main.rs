@@ -14,6 +14,7 @@ mod gifting;
 mod host_auth;
 mod management;
 mod occasion_reminders;
+mod pagination;
 mod profile;
 mod purchase_calendar;
 mod schema;

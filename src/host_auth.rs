@@ -380,14 +380,19 @@ async fn forward(req: &mut Request, res: &mut Response, body: Operation, method:
             }
         }
     }
-    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
-    let http = HTTP.get_or_init(|| {
+    // Loopback forwarding must not inherit a deployment's outbound HTTP proxy.
+    static HTTP: OnceLock<Result<reqwest::Client, &'static str>> = OnceLock::new();
+    let http = match HTTP.get_or_init(|| {
         reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(20))
             .build()
-            .unwrap()
-    });
+            .map_err(|_| "cannot initialize internal API transport")
+    }) {
+        Ok(http) => http,
+        Err(message) => return error(res, StatusCode::SERVICE_UNAVAILABLE, message),
+    };
     let bind = std::env::var("LIYU_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let Ok(addr) = bind.parse::<std::net::SocketAddr>() else {
         return error(

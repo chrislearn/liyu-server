@@ -2,7 +2,7 @@
 
 ## 架构与前提
 
-LIYU-MINI → 标准 `net.http_request` / WebReader → HTTPS Caddy → LIYU 服务端 → PostgreSQL。无需 LIYU 专用宿主，也无需克隆原生 LIYU。AI 使用设备提供的标准模型能力；本地演示无需任何后端。
+LIYU-MINI → 标准 `auth.connect` / `auth.backend.request` → HTTPS Caddy → LIYU 服务端 → PostgreSQL。宿主完成 PKCE 并保管凭据；联系方式验证与 .ics 下载使用服务器拥有的 WebReader 页面。无需 LIYU 专用宿主，也无需克隆原生 LIYU。AI 使用设备提供的标准模型能力；本地演示无需任何后端。
 
 需要 Docker Engine/Desktop 和 Docker Compose v2 或更新版本。执行下列命令的位置均为本仓库根目录。本地 Compose 包含数据库、服务端、Caddy；正式 compose.deploy.yaml 只包含数据库和服务端，镜像包含编译好的管理后台、迁移与商品示例图片。数据库和上传媒体分别保存到命名卷，服务端以非 root 用户运行，数据库及服务端端口不对外发布。
 
@@ -52,11 +52,13 @@ security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychai
 curl --cacert build/liyu-local-root.crt https://liyu.localhost:8443/health
 ```
 
+上述 8443 入口用于浏览器和管理后台；宿主 backend-api-v1 登录要求 HTTPS 443，请按小程序 docs/native-development.md 配置独立开发入口，不要将 8443 直接写入小程序 backend 配置。
+
 健康检查返回成功后，浏览器打开 `https://liyu.localhost:8443/admin`。本地管理员账号见 `deploy/local.env` 的 `LIYU_ADMIN_USERNAME`、`LIYU_ADMIN_PASSWORD`。小程序使用后端网页登录，不输入密码到 Splash。
 
 ### 开发账号、验证码与测试
 
-仅本地模式允许迁移中的 `demo@liyu.test`、`linzhou@liyu.test`、`chenxiao@liyu.test`，密码 `123456`。注册先申请验证码，测试响应才包含 `test_code`。`LIYU_ENV` 只接受 `development` 或 `production`，拼写错误会在连接数据库前拒绝启动。生产模式要求安全管理 Cookie，禁止测试验证码，且禁用仍使用迁移测试密码哈希的账号并撤销其会话。
+仅本地模式允许迁移中的 `demo@liyu.test`、`linzhou@liyu.test`、`chenxiao@liyu.test`，密码 `123456`。注册先申请验证码，测试响应才包含 `test_code`。`LIYU_ENV` 只接受 `development` 或 `production`，拼写错误会在连接数据库前拒绝启动。生产模式要求安全管理 Cookie，禁止 `LIYU_TEST_DELIVERY` 开发开关，且禁用仍使用迁移测试密码哈希的账号并撤销其会话。独立的 `LIYU_TEST_MODE` 固定码体验必须显式开启，规则见文末；正式验证关闭体验开关。
 
 可执行下面的集成测试；执行环境需要 Rust、Python 3 与 `psql`，数据库连接用户需要创建测试数据库的权限。运行器为每组测试创建独立数据库并在结束后删除，另起回环 HTTP 测试后端，不修改原数据库中的业务数据。将连接字符串替换为自己的本地数据库：
 
@@ -104,7 +106,7 @@ https://liyu.localhost:8443 {
 
 ## 3. GitHub CI 与镜像
 
-[工作流](../.github/workflows/ci.yml) 在 PR、main 推送、`v*` 标签和手动运行时执行：Rust 格式、Clippy、编译、单元测试，以及真实数据库上的网页授权、心愿单和双方约定状态测试。测试通过后构建 amd64/arm64 容器；PR 只构建，main/标签使用 `GITHUB_TOKEN` 发布到 GHCR，无需配置仓库密码。需在仓库 Actions 设置允许执行工作流及写入 Packages。版本 Release 的创建还需 contents 写权限。
+[工作流](../.github/workflows/ci.yml) 在 PR、main 推送、`v*` 标签和手动运行时执行：Rust 格式、Clippy、编译、单元测试，以及真实数据库上的网页授权、宿主PKCE、心愿单、约定、购买/日期、商品查询、大列表/时区/代理回归及两组固定码体验测试。测试通过后构建 amd64/arm64 容器；PR 只构建，main/标签使用 `GITHUB_TOKEN` 发布到 GHCR，无需配置仓库密码。需在仓库 Actions 设置允许执行工作流及写入 Packages。版本 Release 的创建还需 contents 写权限。
 
 本仓库预期镜像地址是 `ghcr.io/chrislearn/liyu-server`：
 
@@ -131,7 +133,7 @@ cp deploy/production.env.example deploy/production.env
 chmod 600 deploy/production.env
 ```
 
-修改 POSTGRES_PASSWORD 和 LIYU_ADMIN_PASSWORD（建议 `openssl rand -hex 32` 生成），设置自己的管理员用户名；真实注册需要 LIYU_DELIVERY_WEBHOOK 与 LIYU_DELIVERY_TOKEN，协议见[联系方式发送说明](contact-delivery.md)。LIYU_IMAGE 默认 `ghcr.io/chrislearn/liyu-server:v0.1.2`，必须等该版本 CI 成功发布后拉取，也可替换为已验证的镜像固定摘要。默认 LIYU_PUBLIC_URL 为 `https://liyu.taidge.com`。
+修改 POSTGRES_PASSWORD 和 LIYU_ADMIN_PASSWORD（建议 `openssl rand -hex 32` 生成），设置自己的管理员用户名；真实注册需要 LIYU_DELIVERY_WEBHOOK 与 LIYU_DELIVERY_TOKEN，协议见[联系方式发送说明](contact-delivery.md)。`LIYU_IMAGE` 无默认值，必须填写已验证的发布镜像／固定摘要或 `liyu-server:local`。小程序1.0.45要求服务端0.1.6分页接口；本轮0.1.6源码尚未发布，使用旧镜像会使新版列表读取明确报错。按前节从本轮源码构建时设置 `LIYU_IMAGE=liyu-server:local`，跳过 pull。默认 LIYU_PUBLIC_URL 为 `https://liyu.taidge.com`。
 
 ```sh
 docker compose --env-file deploy/production.env -f compose.deploy.yaml config --quiet
@@ -218,4 +220,4 @@ docker compose --env-file ./production.env -f compose.deploy.yaml up -d --force-
 docker compose --env-file ./production.env -f compose.deploy.yaml exec server printenv LIYU_TEST_MODE
 ```
 
-最后一条应输出 true。镜像 v0.1.2 已包含该功能；拉取新镜像仍需通过 up 更新运行中的容器。环境文件和 Compose 文件都使用显式路径，避免在没有默认 compose.yaml 的目录执行 docker compose pull 时出现找不到配置的错误。
+最后一条应输出 true。镜像须包含固定码体验功能；拉取新镜像仍需通过 up 更新运行中的容器。环境文件和 Compose 文件都使用显式路径，避免在没有默认 compose.yaml 的目录执行 docker compose pull 时出现找不到配置的错误。

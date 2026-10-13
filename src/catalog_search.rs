@@ -153,12 +153,16 @@ async fn search(
             .bind::<BigInt,_>(constraints.max_price_cents).bind::<Array<Text>,_>(&constraints.allowed_kinds).bind::<Array<Text>,_>(&constraints.excluded_kinds).bind::<Text,_>(delivery).get_result::<Count>(conn)?.n;
         let total=diesel::sql_query(format!("SELECT count(*) AS n FROM catalog WHERE {hard} AND {soft}"))
             .bind::<BigInt,_>(constraints.max_price_cents).bind::<Array<Text>,_>(&constraints.allowed_kinds).bind::<Array<Text>,_>(&constraints.excluded_kinds).bind::<Text,_>(delivery).bind::<Text,_>(&pattern).get_result::<Count>(conn)?.n;
-        let mut rows=diesel::sql_query(format!("SELECT {} FROM catalog WHERE {hard} AND {soft} AND id>$6 ORDER BY id LIMIT $7",crate::catalog::COLUMNS))
+        let rows=diesel::sql_query(format!("SELECT {} FROM catalog WHERE {hard} AND {soft} AND id>$6 ORDER BY id LIMIT $7",crate::catalog::COLUMNS))
             .bind::<BigInt,_>(constraints.max_price_cents).bind::<Array<Text>,_>(&constraints.allowed_kinds).bind::<Array<Text>,_>(&constraints.excluded_kinds).bind::<Text,_>(delivery).bind::<Text,_>(&pattern).bind::<diesel::sql_types::Integer,_>(cursor).bind::<BigInt,_>(limit+1).load::<crate::catalog::ProductRow>(conn)?;
         let snapshot=diesel::sql_query("SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY id),'[]'::jsonb) AS data FROM catalog c").get_result::<Snapshot>(conn)?;
-        let has_more=rows.len() as i64>limit;rows.truncate(limit as usize);
-        let next_cursor=if has_more{rows.last().map(|p|p.id.to_string())}else{None};
-        Ok(Some(SearchPage{items:rows.into_iter().map(crate::catalog::Product::from).collect(),next_cursor,eligible_total:eligible,total_matches:total,catalog_revision:Sha256::digest(snapshot.data.to_string().as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect(),applied:constraints.clone()}))
+        let products: Vec<_> = rows.into_iter().map(crate::catalog::Product::from).collect();
+        let values = serde_json::to_value(&products).unwrap();
+        let page = crate::pagination::Page::bounded(values.as_array().unwrap(), limit as usize, "id")
+            .map_err(|_| diesel::result::Error::RollbackTransaction)?;
+        let count = page["items"].as_array().unwrap().len();
+        let next_cursor = page["next_cursor"].as_str().map(str::to_string);
+        Ok(Some(SearchPage{items:products.into_iter().take(count).collect(),next_cursor,eligible_total:eligible,total_matches:total,catalog_revision:Sha256::digest(snapshot.data.to_string().as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect(),applied:constraints.clone()}))
     });
     match result {
         Ok(Some(page)) => res.render(Json(page)),

@@ -283,7 +283,15 @@ async fn notifications(req: &mut Request, res: &mut Response) {
             "occasion reminders failed",
         );
     }
-    match sql_query("SELECT to_jsonb(n) AS data FROM notifications n WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY id DESC LIMIT 100").bind::<BigInt,_>(uid).load::<JsonRow>(&mut conn) {Ok(rows)=>res.render(Json(json!(rows.into_iter().map(|r|r.data).collect::<Vec<_>>()))),Err(_)=>error(res,StatusCode::INTERNAL_SERVER_ERROR,"notifications query failed")}
+    let page = match crate::pagination::Page::read(req) {
+        Ok(page) => page,
+        Err(message) => return error(res, StatusCode::BAD_REQUEST, message),
+    };
+    let order = page.sql("n.id", "ORDER BY n.id DESC LIMIT 100");
+    match sql_query(format!("SELECT to_jsonb(n) AS data FROM notifications n WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now() {order}")).bind::<BigInt,_>(uid).load::<JsonRow>(&mut conn) {
+        Ok(rows) => page.render(res, rows.into_iter().map(|r|r.data).collect::<Vec<_>>(), "id"),
+        Err(_) => error(res,StatusCode::INTERNAL_SERVER_ERROR,"notifications query failed"),
+    }
 }
 
 pub(crate) fn routes() -> Router {

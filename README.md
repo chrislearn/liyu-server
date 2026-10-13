@@ -2,7 +2,7 @@
 
 Rust + Salvo REST API backed by PostgreSQL and Diesel. The implementation plan, current gaps, API inventory and privacy matrix are in [todos/app-api.md](todos/app-api.md). This backend keeps test payment and carrier flows; contact gifting now has verified identities and a configurable SMS/email delivery bridge. See [contact delivery](docs/contact-delivery.md). Bind to loopback by default; fixed test credentials must never be exposed publicly.
 
-LIYU-MINI 1.0.38 uses host-managed backend PKCE and declared business operations. See [host PKCE](docs/host-pkce.md) for credentials, rotation, migration and platform limits. The [browser authorization](docs/browser-authorization.md) protocol remains for legacy clients and contact verification.
+LIYU-MINI 1.0.38 and later use host-managed backend PKCE and declared business operations. See [host PKCE](docs/host-pkce.md) for credentials, rotation, migration and platform limits. The [browser authorization](docs/browser-authorization.md) protocol remains for legacy clients and contact verification.
 
 数据范围、供应商传输、会话撤销及删除边界见[服务端隐私说明](PRIVACY.md)。
 
@@ -17,7 +17,7 @@ docker compose --env-file deploy/production.env -f compose.deploy.yaml pull
 docker compose --env-file deploy/production.env -f compose.deploy.yaml up -d --wait
 ```
 
-默认镜像标签为 `v0.1.2`，已发布并包含固定验证码体验开关。详细配置与核验步骤见部署指南。
+部署时必须显式设置 `LIYU_IMAGE` 为已验证的发布镜像／固定摘要或本地构建镜像。小程序1.0.45需要本仓库0.1.6分页接口；当前0.1.6源码更新尚未发布，旧镜像不能视为具备这些接口。详细配置与核验步骤见部署指南。
 
 
 ## Run
@@ -191,3 +191,11 @@ POST `/calendar-export` 创建五分钟导出页，随机密钥在 URL fragment 
 应用自动理解原条件，精确范围无结果时可另发备选范围查询，但必须保持原条件并显示差异；接口仍严格执行每次提交的filter。商品资料无法验证的条件不宣称满足。应用不接受模型生成任意网址、SQL或写操作。
 
 核验：`cargo test --locked`、`cargo clippy --locked --all-targets -- -D warnings`及`DATABASE_URL=<本地测试集群postgres> python3 tests/run_ci.py`。新增catalog_search_e2e.py使用专属一次性数据库验证OpenAPI、过滤、零结果证据、库存、字面查询和超过50件的分页。源码升级不表示公网已经部署。
+
+## 0.1.6 开发更新（尚未发布）
+
+心愿单日期规则与约定创建日期固定为 Asia/Shanghai，与纪念日提醒一致，不依赖数据库会话时区。熟人、我的/熟人的心愿单、收/发礼盒、约定和提醒支持可选 `?limit=20&before=0` 分页，返回 `{items,next_cursor}`，按编号降序继续下一页；不传分页参数保留旧数组契约。商品目录按原游标升序分页。每页最多约48 KB JSON内容；长资料会缩小实际条数并保留后续游标，单项过大明确拒绝。内部 host/read 转发使用禁用代理的回环客户端，出站代理配置不影响宿主业务请求，客户端初始化失败返回503。
+
+本轮复审完成45个Rust测试与9组一次性数据库套件，共454项HTTP检查及两组固定码体验流程；其中新增41项验证大列表、长说明、上海日期、跨午夜约定与失效代理环境。测试不代表公网已部署；配套客户端恢复与存储故障处理见 liyu-mini 的 docs/stability.md。
+
+LIYU-MINI 1.0.45 需要部署本版本的分页接口；源代码更新不代表公网已升级。新增 `tests/resilience_e2e.py` 使用专用一次性数据库核验超过50件商品、超过100件收礼和长说明的宿主转发，并在不同数据库时区下检查上海日期边界。

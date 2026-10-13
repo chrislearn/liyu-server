@@ -495,25 +495,32 @@ async fn inbox(req: &mut Request, res: &mut Response) {
     let Some(uid) = requester(req, res) else {
         return;
     };
+    let page = match crate::pagination::Page::read(req) {
+        Ok(page) => page,
+        Err(message) => return error(res, StatusCode::BAD_REQUEST, message),
+    };
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
     if settle_expired(&mut conn, uid).is_err() {
         return error(res, StatusCode::INTERNAL_SERVER_ERROR, "gift expiry failed");
     }
+    let page_order = page.sql("g.id", "ORDER BY g.available_at DESC,g.id DESC LIMIT 100");
     let sql = format!(
         "{GIFT_VIEW_SELECT} WHERE g.recipient_id=$1 AND g.available_at<=now() \
-         AND g.state<>'withdrawn' ORDER BY g.available_at DESC,g.id DESC LIMIT 100"
+         AND g.state<>'withdrawn' {page_order}"
     );
     let rows = diesel::sql_query(sql)
         .bind::<BigInt, _>(uid)
         .load::<GiftView>(&mut conn);
     match rows {
-        Ok(rows) => res.render(Json(
+        Ok(rows) => page.render(
+            res,
             rows.into_iter()
                 .map(recipient_projection)
                 .collect::<Vec<_>>(),
-        )),
+            "id",
+        ),
         Err(_) => error(res, StatusCode::INTERNAL_SERVER_ERROR, "inbox query failed"),
     }
 }
@@ -523,22 +530,27 @@ async fn outbox(req: &mut Request, res: &mut Response) {
     let Some(uid) = requester(req, res) else {
         return;
     };
+    let page = match crate::pagination::Page::read(req) {
+        Ok(page) => page,
+        Err(message) => return error(res, StatusCode::BAD_REQUEST, message),
+    };
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
     if settle_expired(&mut conn, uid).is_err() {
         return error(res, StatusCode::INTERNAL_SERVER_ERROR, "gift expiry failed");
     }
-    let sql = format!(
-        "{SENDER_VIEW_SELECT} WHERE g.sender_id=$1 ORDER BY g.created_at DESC,g.id DESC LIMIT 100"
-    );
+    let page_order = page.sql("g.id", "ORDER BY g.created_at DESC,g.id DESC LIMIT 100");
+    let sql = format!("{SENDER_VIEW_SELECT} WHERE g.sender_id=$1 {page_order}");
     let rows = diesel::sql_query(sql)
         .bind::<BigInt, _>(uid)
         .load::<SenderView>(&mut conn);
     match rows {
-        Ok(rows) => res.render(Json(
+        Ok(rows) => page.render(
+            res,
             rows.into_iter().map(sender_projection).collect::<Vec<_>>(),
-        )),
+            "id",
+        ),
         Err(_) => error(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -946,25 +958,30 @@ async fn contracts(req: &mut Request, res: &mut Response) {
     let Some(uid) = requester(req, res) else {
         return;
     };
+    let page = match crate::pagination::Page::read(req) {
+        Ok(page) => page,
+        Err(message) => return error(res, StatusCode::BAD_REQUEST, message),
+    };
     let Ok(mut conn) = pool().get() else {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     };
-    let rows = diesel::sql_query(
+    let page_order = page.sql("g.id", "ORDER BY g.created_at DESC,g.id DESC LIMIT 100");
+    let rows = diesel::sql_query(format!(
         "SELECT g.id AS gift_id,(g.recipient_id=$1) AS mine, \
          CASE WHEN g.recipient_id=$1 THEN sender.display_name ELSE recipient.display_name END AS peer_name, \
          g.product_id,g.contract_text,COALESCE(c.status,'pending') AS status, \
-         to_char(g.created_at,'YYYY-MM-DD') AS created_on,COALESCE(to_char(d.confirmed_on,'YYYY-MM-DD'),'') AS planned_on \
+         to_char(g.created_at AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD') AS created_on,COALESCE(to_char(d.confirmed_on,'YYYY-MM-DD'),'') AS planned_on \
          FROM gifts g JOIN users sender ON sender.id=g.sender_id \
          JOIN users recipient ON recipient.id=g.recipient_id \
          LEFT JOIN gift_contract_marks c ON c.gift_id=g.id AND c.user_id=$1 \
          LEFT JOIN gift_contract_schedules d ON d.gift_id=g.id \
          WHERE (g.sender_id=$1 OR g.recipient_id=$1) AND g.state='accepted' \
-         AND g.contract_text<>'' ORDER BY g.created_at DESC,g.id DESC LIMIT 100",
-    )
+         AND g.contract_text<>'' {page_order}",
+    ))
     .bind::<BigInt, _>(uid)
     .load::<ContractRow>(&mut conn);
     match rows {
-        Ok(rows) => res.render(Json(rows)),
+        Ok(rows) => page.render(res, rows, "gift_id"),
         Err(_) => error(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -5,6 +5,7 @@
 .octos/OUTER_LOOP_REVIEW.md
 .octos/EVOLUTION.md
 .octos/OUTER_LOOP_REVIEW.md.lock
+.DS_Store
 
 tmp/*
 .octos/*

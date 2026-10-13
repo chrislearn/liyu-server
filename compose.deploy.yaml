@@ -15,7 +15,7 @@ services:
       retries: 20
     restart: unless-stopped
   server:
-    image: ${LIYU_IMAGE:-ghcr.io/chrislearn/liyu-server:v0.1.2}
+    image: ${LIYU_IMAGE:?Set LIYU_IMAGE to a verified release image or local build}
     environment:
       DATABASE_URL: postgres://liyu:${POSTGRES_PASSWORD}@db:5432/liyu
       LIYU_BIND: 0.0.0.0:8787
