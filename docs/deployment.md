@@ -119,7 +119,7 @@ https://liyu.localhost:8443 {
 上线时优先固定已验证的标签或 `@sha256:...` 摘要。没有已发布镜像时可以本地构建：
 
 ```sh
-docker build -t liyu-server:local .
+docker build --build-arg LIYU_GIT_HASH="$(git rev-parse HEAD)" -t liyu-server:local .
 ```
 
 然后将配置中的 `LIYU_IMAGE` 改成 `liyu-server:local`，跳过 `pull server`。Dockerfile 会编译后台，不依赖本地已有的 `web/dist` 或 `target`。
