@@ -198,6 +198,20 @@ GitHub Actions 已固定到完整提交 SHA，Cargo 依赖使用锁文件；基�
 
 当前线上入口为 **https://liyu.taidge.com**；业务 API 在 `/api/v1`，管理后台在 `/admin`。2026-10-09 从公网检查 `/health` 返回 HTTP 200 和 `{"status":"ok"}`，这是健康检查证据，不代表真实发送服务或全部业务验收。
 
+### 健康接口与构建身份
+
+从服务端 0.1.7 起，`GET /health` 在数据库检查成功后返回 `status: "ok"`、`version`、`git_hash` 和 `git_dirty`。版本来自 Cargo 包配置；hash 是编译时固化的完整 Git commit，`git_dirty` 为构建时有无本地修改。数据库不可用仍返回 503，不改为成功响应。
+
+本仓库内 `cargo build --locked` 自动读取 Git 元数据；切换分支、提交或修改编译源文件会触发重新读取。无 Git 的源码归档返回 `git_hash: "unknown"`、`git_dirty: null`，不会借用父目录仓库的提交。也可在**构建时**指定 `LIYU_GIT_HASH`（完整40或64位十六进制 hash）和 `LIYU_GIT_DIRTY=true|false`；无效值使构建失败。运行容器时设置这些变量不能修改已编译的信息。
+
+CI 构建镜像自动传入 `${{ github.sha }}` 和 clean 状态。手工 Docker 构建因 `.git` 被排除，至少传入提交：
+
+```sh
+docker build --build-arg LIYU_GIT_HASH="$(git rev-parse HEAD)" -t liyu-server .
+```
+
+此命令没有声明源码 clean，`git_dirty` 为 `null`；确认源码无改动后可增加 `--build-arg LIYU_GIT_DIRTY=false`。部署新镜像或二进制后用 `curl --fail https://liyu.taidge.com/health` 将 hash 与计划部署的提交核对，随后仍需核验 `/api/v1/catalog/search-options` 和实际查询响应；版本和 hash 不能替代接口验收。
+
 环境文件可放在 `deploy/production.env`，也可像实际服务器一样放在根目录 `./production.env`。后者启动命令为：
 
 ```sh

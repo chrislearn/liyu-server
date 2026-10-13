@@ -118,6 +118,8 @@ Do not edit `up.sql` to "make it fit" an old database; the baseline migration mu
 
 All paths below are under `/api/v1`, except `/health`. Authenticated endpoints need `Authorization: Bearer <token>`.
 
+`GET /health` checks the database and returns `status`, `version` (Cargo package version), `git_hash` (full build-time commit), and `git_dirty` (whether the source checkout had local changes). Missing Git metadata is reported as `"unknown"` / `null`; runtime environment variables cannot change the embedded build identity. Build and deployment details are in [deployment.md](docs/deployment.md#健康接口与构建身份).
+
 | Area | Endpoints |
 | --- | --- |
 | Auth | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /me` |

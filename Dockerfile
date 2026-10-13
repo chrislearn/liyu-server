@@ -14,9 +14,13 @@ COPY web/admin.css web/admin.css
 RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry python3 scripts/build-admin.py
 
 FROM ${RUST_IMAGE} AS server
+ARG LIYU_GIT_HASH
+ARG LIYU_GIT_DIRTY
+ENV LIYU_GIT_HASH=${LIYU_GIT_HASH} LIYU_GIT_DIRTY=${LIYU_GIT_DIRTY}
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev pkg-config && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 COPY src/ src/
 COPY migrations/ migrations/
 COPY web/ web/

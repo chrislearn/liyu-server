@@ -152,7 +152,12 @@ async fn health(res: &mut Response) {
     if diesel::sql_query("SELECT 1").execute(&mut conn).is_err() {
         return error(res, StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     }
-    res.render(Json(json!({"status": "ok"})));
+    res.render(Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_hash": env!("LIYU_BUILD_GIT_HASH"),
+        "git_dirty": env!("LIYU_BUILD_GIT_DIRTY").parse::<bool>().ok(),
+    })));
 }
 
 async fn authenticate(req: &mut Request, res: &mut Response, is_register: bool) {

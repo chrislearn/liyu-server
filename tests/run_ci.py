@@ -3,6 +3,7 @@
 import json
 import hashlib
 import os
+import re
 import socket
 from pathlib import Path
 import subprocess
@@ -56,6 +57,11 @@ for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
                     with local_http.open(f'http://127.0.0.1:{port}/health', timeout=1) as response:
                         if (response.status == 200 and process.poll() is None
                                 and f'LiYu test API listening on 127.0.0.1:{port}'.encode() in Path(log.name).read_bytes()):
+                            health = json.load(response)
+                            assert health['status'] == 'ok'
+                            assert health['version'] == re.search(r'^version = "([^"]+)"', (root / 'Cargo.toml').read_text(), re.M)[1]
+                            assert health['git_hash'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+                            assert health['git_dirty'] == bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, text=True).strip())
                             break
                 except OSError:
                     time.sleep(1)
@@ -86,7 +92,7 @@ for prefix, suite in [('browser_auth', 'browser_auth_e2e.py'),
 
 output = root / 'build/verification'
 output.mkdir(parents=True, exist_ok=True)
-source_files = [root / 'Cargo.toml', root / 'Cargo.lock', *sorted((root / 'src').rglob('*.rs')), *sorted((root / 'tests').glob('*.py')), *sorted((root / 'migrations').rglob('*.sql'))]
+source_files = [root / 'Cargo.toml', root / 'Cargo.lock', root / 'build.rs', *sorted((root / 'src').rglob('*.rs')), *sorted((root / 'tests').glob('*.py')), *sorted((root / 'migrations').rglob('*.sql'))]
 source_sha256 = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
 report = {'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
           'source_files_sha256': source_sha256, 'working_tree_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, text=True).strip()),
