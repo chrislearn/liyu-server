@@ -11,7 +11,7 @@ on:
         type: string
         default: ''
 concurrency:
-  group: liyu-server-${{ github.ref }}
+  group: liyu-server-${{ github.ref }}-${{ inputs.promote_existing_commit && 'promotion' || 'build' }}
   cancel-in-progress: true
 permissions:
   contents: read
@@ -129,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full commit SHA'; exit 1; }
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SOURCE_COMMIT" --status success --json databaseId --jq '.[0].databaseId')
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SOURCE_COMMIT" --event push --status success --json databaseId --jq '.[0].databaseId')
           test -n "$run_id" && test "$run_id" != null
           gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '.jobs | any(.name == "image" and .conclusion == "success")' | grep -qx true
           repository="ghcr.io/${GITHUB_REPOSITORY,,}"
